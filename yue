@@ -1,0 +1,298 @@
+#!/bin/bash
+
+VERSION='0.1.0'
+DOCKER=`which docker`
+if [ -z $DOCKER ]; then
+ echo "docker(https://www.docker.com) is required by yue"
+fi
+DOCKER_VERSION=`docker --version`
+
+function usage {
+cat << __USAGE__
+usage: yue [options] (command) [arg...]
+
+programming platform for distribute computing environment
+
+options:
+    --daemon=false                  enable daemon mode
+    -a,--address={address}          expose port of this yue program to {address}.
+    --bridge=br1                    specify bridge name which is used for assign ip address by -a option
+    -p,--path　　                    add search path for lua libraries. same file path in local file system autometically mounted
+    -i,--image="umegaya/luact:core" specify container image used for running script
+    -d config=value                 pass configuration variable to docker. equivalent to give --config=value to docker
+    -l config=value                 pass configuration variable to luact. equivalent to give --config=value to luact
+    -c,--core=1                     specify number of luajit VM thread. default == number of CPU core
+    --luact={path}                  using luact module from {path} in local file system
+    -v,--verbose                    show verbose output
+    -w,--workdir={rel path}         set root path of data directory and log directory. {rel path} must be relative and inside to current working directory.
+    --version                       show version
+
+commands:
+    run                             run specified file (default)
+    build                           build container image with current setting
+
+__USAGE__
+}
+function show_version {
+cat << __VERSION__
+__  ____ __ __    ____
+\ \ \  // / \ \  / ___\\
+ \ \/ / | | | | / /
+  \  /  | | | | ~~~~~~~~ version $VERSION
+ _/ /   \ \_/ / \ \___   $DOCKER_VERSION
+ \_/     \___/   \____/  
+it is brilliant on the cloud
+	
+(c)2014 - 2015 Takehiro Iyatomi(iyatomi@gmail.com)
+__VERSION__
+}
+
+
+## utils
+function join { local IFS="$1"; shift; echo "$*"; }
+function abspath {
+	local dir=`pwd`
+	echo ${1/\./$dir}
+}
+function assign_ip {
+	local bridge="br1"
+	if [ ! -z $3 ]; then
+		bridge=$3
+	fi
+	if [ `uname` = "Darwin" ]; then
+		local HAS_PIPEWORK=`boot2docker ssh [ -f "/var/lib/boot2docker/pipework" ] || echo "ng"`
+		if [ ! -z $HAS_PIPEWORK ]; then
+			git clone https://github.com/jpetazzo/pipework.git
+			scp -i ~/.ssh/id_boot2docker pipework/pipework docker@`boot2docker ip`:/var/lib/boot2docker/
+			rm -rf pipework
+		fi
+		boot2docker ssh sudo sh /var/lib/boot2docker/pipework $bridge $1 $2
+	else
+		local HAS_PIPEWORK=[ -e "~/pipework" ] || echo "ng"
+		if [ ! -z $HAS_PIPEWORK ]; then
+			git clone https://github.com/jpetazzo/pipework.git
+			cp pipework/pipework ~
+			rm -rf pipework
+		fi
+		sh ~/pipework $bridge $1 $2
+	fi
+}
+
+## command line arguments
+SUBCOMMAND=run
+DAEMON=
+LIBPATH=(/usr/local/share/lua/5.1/ /usr/local/share/luajit-2.0.3/)
+EXECFILE=
+LUACT_IMAGE="umegaya/luact:core"
+WORKDIR="/tmp/lunarsurface"
+LOGDIR="$WORKDIR/logs"
+DATADIR="$WORKDIR/data"
+LUACT_CONFIG=()
+DOCKER_CONFIG=()
+PRELOADS=(libpthread.so.0 libjemalloc.so.1)
+LUACT_PATH=
+NUM_CORE=
+VERBOSE=
+ADDRESS=
+BRIDGE=
+
+for i in "$@"
+do
+case $i in
+	--daemon)
+	DAEMON=yes
+	shift
+	;;
+	-v)
+	VERBOSE=yes
+	shift
+	;;
+	--verbose)
+	VERBOSE=yes
+	shift
+	;;
+	--version)
+	show_version
+	exit 0
+	;;	
+	-p)
+	LIBPATH[${#LIBPATH[@]}]=`abspath $2`
+	shift
+	shift
+	;;
+	--path=*)
+	LIBPATH[${#LIBPATH[@]}]=`abspath ${i#*=}`
+	shift
+	;;
+	-a)
+	ADDRESS=$2
+	shift
+	shift
+	;;
+	--address=*)
+	ADDRESS=${i#*=}
+	shift
+	;;
+	--bridge=*)
+	BRIDGE=${i#*=}
+	shift
+	;;
+	-i)
+	LUACT_IMAGE=$2
+	shift
+	shift
+	;;
+	--image=*)
+	LUACT_IMAGE=${i#*=}
+	shift
+	;;
+	-c)
+	NUM_CORE=$2
+	shift
+	shift
+	;;
+	--core=*)
+	NUM_CORE=${i#*=}
+	shift
+	;;
+	-d)
+	DOCKER_CONFIG[${#DOCKER_CONFIG[@]}]=$2
+	shift
+	shift
+	;;
+	-l)
+	LUACT_CONFIG[${#LUACT_CONFIG[@]}]=$2
+	shift
+	shift
+	;;
+	-w)
+	LOGDIR="$WORKDIR/$2/logs"
+	DATADIR="$WORKDIR/$2/data"
+	shift
+	shift
+	;;
+	--workdir=*)
+	LOGDIR="$WORKDIR/${i#*=}/logs"
+	DATADIR="$WORKDIR/${i#*=}/data"
+	shift
+	;;
+	--luact=*)
+	LUACT_PATH=${i#*=}
+	shift
+	;;
+	-*)
+	echo "unknown option: $i"
+	usage
+	exit -1
+	;;
+	*.lua)
+	EXECFILE=$i
+	shift
+	;;
+	"run" | "build" | "setup")
+	SUBCOMMAND=$i
+	shift
+	;;
+esac
+done
+
+#echo "subc:$SUBCOMMAND"
+#️echo "daemon:$DAEMON"
+#️echo "libpath:${LIBPATH[@]}"
+#️echo "config:${LUACT_CONFIG[@]}"
+#echo "execfile:$EXECFILE"
+
+function run {
+	local wd=`pwd`
+	local PRELOAD_LIBS=`join : ${PRELOADS[@]}`
+	local docker_options="--privileged -e LD_PRELOAD=$PRELOAD_LIBS -v $wd:$WORKDIR"
+	local luact_options="--datadir=$DATADIR"
+	if [ ${#LUACT_CONFIG[@]} -ne 0 ]; then
+		for c in "${LUACT_CONFIG[@]}"
+		do
+			luact_options="$luact_options --$c"
+		done
+	fi
+	if [ ! -z $NUM_CORE ]; then
+		luact_options="$luact_options --n_core=$NUM_CORE"
+	fi
+	if [ ! -z $VERBOSE ]; then
+		luact_options="$luact_options --verbose=true"
+	fi
+	if [ ${#DOCKER_CONFIG[@]} -ne 0 ]; then
+		for c in "${DOCKER_CONFIG[@]}"
+		do
+			docker_options="$docker_options --$c"
+		done
+	fi
+	if [ ${#LIBPATH[@]} -ne 0 ]; then
+		for p in "${LIBPATH[@]}"
+		do
+			docker_options="$docker_options -v $p:$p"
+		done
+	fi
+	if [ ! -z $LUACT_PATH ]; then
+		docker_options="$docker_options -v $LUACT_PATH:/luact"
+	fi
+	if [ ! -z $ADDRESS ]; then
+		if [ -z $DAEMON ]; then
+			echo "-a only can use with -d"
+			exit -1
+		fi
+	else
+		docker_options="$docker_options --net=\"host\""
+	fi
+	if [ ! -z $DAEMON ]; then
+		docker_options="$docker_options -d"
+		luact_options="--logdir=$LOGDIR $luact_options"
+	else
+		docker_options="$docker_options --rm"
+	fi
+	local cmd="cd $WORKDIR && luajit -e 'package.path=[[/luact/?.lua;]]..package.path' /luact/run.lua $1 $luact_options"
+	# echo "cmdl:	docker run $docker_options $LUACT_IMAGE bash -c \"$cmd\""
+	if [ ! -z $DAEMON ]; then
+		CID=$(docker run $docker_options $LUACT_IMAGE bash -c "$cmd")
+		echo $CID
+		if [ ! -z $ADDRESS ]; then
+			assign_ip $CID $ADDRESS $BRIDGE
+		fi
+	else
+		docker run $docker_options $LUACT_IMAGE bash -c "$cmd"
+	fi
+}
+
+function setup {
+	local N=3
+	if [ `uname` != "Darwin" ]; then
+		echo "setup:unsupported platform"
+	fi
+	if [ -z $1 ]; then
+		echo "setup:please specify virtual box network if (vboxnet*)"
+	fi
+	if [ ! -z $2 ]; then
+		N=$2
+	fi
+	boot2docker down
+	VBoxManage modifyvm boot2docker-vm --nic$N hostonly --hostonlyadapter$N $1
+	VBoxManage modifyvm boot2docker-vm --nicpromisc$N allow-all
+	boot2docker up
+}
+
+function build {
+	local image_name=$1
+}
+
+if [ "$SUBCOMMAND" = "run" ]; then
+	run $EXECFILE
+	exit 0
+fi
+if [ "$SUBCOMMAND" = "build" ]; then
+	build $EXECFILE
+	exit 0
+fi
+if [ "$SUBCOMMAND" = "setup" ]; then
+	setup $1 $2
+	exit 0
+fi
+
+
