@@ -255,6 +255,10 @@ function run {
 		echo $CID
 		if [ ! -z $ADDRESS ]; then
 			assign_ip $CID $ADDRESS $BRIDGE
+			if [ $? -ne 0 ]; then
+				echo "fail to setup address: $CID"
+				docker kill $CID
+			fi
 		fi
 	else
 		docker run $docker_options $LUACT_IMAGE bash -c "$cmd"

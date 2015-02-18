@@ -1,5 +1,9 @@
-local ref = luact.ref('http://192.168.1.1/srv')
+local ref = luact.ref('tcp://192.168.1.2:8080/srv')
 
-for i=1,100000 do
-	assert(true == ref:echo(true))
+local start = luact.clock.get()
+logger.info('start loop')
+for i=1,10000 do
+	assert(true == ref.echo(true))
 end
+logger.info('end loop', luact.clock.get() - start)
+	
