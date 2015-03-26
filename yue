@@ -5,7 +5,7 @@ DOCKER=`which docker`
 if [ -z $DOCKER ]; then
  echo "docker(https://www.docker.com) is required by yue"
 fi
-DOCKER_VERSION=`docker --version`
+DOCKER_VERSION=`$DOCKER --version`
 
 function usage {
 cat << __USAGE__
@@ -81,7 +81,7 @@ function assign_ip {
 ## command line arguments
 SUBCOMMAND=run
 DAEMON=
-LIBPATH=(/usr/local/share/lua/5.1/ /usr/local/share/luajit-2.0.3/)
+LIBPATH=(/usr/local/share/lua/5.1/ /usr/local/share/luajit-2.1.0-alpha/)
 EXECFILE=
 LUACT_IMAGE="umegaya/luact:core"
 WORKDIR="/tmp/lunarsurface"
@@ -90,6 +90,7 @@ DATADIR="$WORKDIR/data"
 LUACT_CONFIG=()
 DOCKER_CONFIG=()
 PRELOADS=(libpthread.so.0 libjemalloc.so.1)
+LUAJIT_BIN="luajit-2.1.0-alpha -e \"require('jit.opt').start('minstitch=10000')\""
 LUACT_PATH=
 NUM_CORE=
 VERBOSE=
@@ -201,6 +202,7 @@ done
 #️echo "libpath:${LIBPATH[@]}"
 #️echo "config:${LUACT_CONFIG[@]}"
 #echo "execfile:$EXECFILE"
+#echo "luajit:$LUAJIT_BIN"
 
 function run {
 	local wd=`pwd`
@@ -248,7 +250,7 @@ function run {
 	else
 		docker_options="$docker_options --rm"
 	fi
-	local cmd="cd $WORKDIR && luajit -e 'package.path=[[/luact/?.lua;]]..package.path' /luact/run.lua $1 $luact_options"
+	local cmd="cd $WORKDIR && $LUAJIT_BIN -e 'package.path=[[/luact/?.lua;]]..package.path' /luact/run.lua $1 $luact_options"
 	# echo "cmdl:	docker run $docker_options $LUACT_IMAGE bash -c \"$cmd\""
 	if [ ! -z $DAEMON ]; then
 		CID=$(docker run $docker_options $LUACT_IMAGE bash -c "$cmd")
