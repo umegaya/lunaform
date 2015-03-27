@@ -8,4 +8,4 @@ rm -rf sv1 sv2
 
 echo "wait for server booting"
 sleep 7
-tail -F ./sv1/logs/1/current ./sv2/logs/1/current
+tail -F ./work/sv1/logs/1/current ./work/sv2/logs/1/current

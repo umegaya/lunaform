@@ -7,32 +7,59 @@ if [ -z $DOCKER ]; then
 fi
 DOCKER_VERSION=`$DOCKER --version`
 
+
+
+#===========================================
+# usage
+#===========================================
 function usage {
 cat << __USAGE__
 usage: yue [options] (command) [arg...]
 
 programming platform for distribute computing environment
 
-options:
-    --daemon=false                  enable daemon mode
-    -a,--address={address}          expose port of this yue program to {address}.
-    --bridge=br1                    specify bridge name which is used for assign ip address by -a option
-    -p,--path　　                    add search path for lua libraries. same file path in local file system autometically mounted
-    -i,--image="umegaya/luact:core" specify container image used for running script
-    -d config=value                 pass configuration variable to docker. equivalent to give --config=value to docker
-    -l config=value                 pass configuration variable to luact. equivalent to give --config=value to luact
-    -c,--core=1                     specify number of luajit VM thread. default == number of CPU core
-    --luact={path}                  using luact module from {path} in local file system
+common options:
     -v,--verbose                    show verbose output
-    -w,--workdir={rel path}         set root path of data directory and log directory. {rel path} must be relative and inside to current working directory.
     --version                       show version
+    -w,--workdir={rel path}         (run and build) set root path of data directory and log directory. 
+                                    {rel path} must be relative and inside to current working directory.
+    --luact={path}                  using luact module from {path} in local file system
+    --help                          show this usage
 
 commands:
-    run                             run specified file (default)
-    build                           build container image with current setting
+    run {execfile}                  run specified {execfile} (default)
+        --daemon=false                  enable daemon mode. if -H is specified, this option is always true
+        -a,--address={address}          expose port of this yue program to {address}.
+        --bridge=br1                    specify bridge name which is used for assign ip address by -a option
+        -p,--path　　                   add search path for lua libraries. same file path in local file system autometically mounted.
+        -i,--image="umegaya/luact:core" specify container image used for running script
+        -d config=value                 pass configuration variable to docker. equivalent to give --config=value to docker
+        -l config=value                 pass configuration variable to luact. equivalent to give --config=value to luact
+        -c,--core=1                     specify number of luajit VM thread. default == number of CPU core
+
+    build {image}                   build container image whose name is {imagename} with current setting
+    	-f={file path}                  specify Dockerfile path (if it exists in ., yue autometically use it)
+        -p,--path　　                   add search path for lua libraries. same file path in local file system will be added to image. 
+                                        this option only enabled when no Dockerfile can be used. 
+        -e=main.lua                     specify entry point of your application.
+        -d config=value                 pass configuration variable to docker. equivalent to give --config=value to docker
+        -l config=value                 pass configuration variable to luact, as command line argument to CMD directive when Dockerfile autometically generated. 
+                                        if you use your dockerfile, it will be ignored.
+        --push=false                    execute docker push {image} when build succeed.
+
+    node {name}                     create infrastructure of yue whose name is {machine} on various IaaS
+        -i={IaaS type}                  
+
+    sdn                             control network topology (use with node)
 
 __USAGE__
 }
+
+
+
+#===========================================
+# version
+#===========================================
 function show_version {
 cat << __VERSION__
 __  ____ __ __    ____
@@ -48,7 +75,10 @@ __VERSION__
 }
 
 
-## utils
+
+#===========================================
+# utils
+#===========================================
 function join { local IFS="$1"; shift; echo "$*"; }
 function abspath {
 	local dir=`pwd`
@@ -78,32 +108,27 @@ function assign_ip {
 	fi
 }
 
-## command line arguments
+
+
+#===========================================
+# common command line arguments
+#===========================================
 SUBCOMMAND=run
-DAEMON=
-LIBPATH=(/usr/local/share/lua/5.1/ /usr/local/share/luajit-2.1.0-alpha/)
-EXECFILE=
-LUACT_IMAGE="umegaya/luact:core"
 WORKDIR="/tmp/lunarsurface"
-LOGDIR="$WORKDIR/logs"
-DATADIR="$WORKDIR/data"
+LOGDIR="$WORKDIR/work/logs"
+DATADIR="$WORKDIR/work/data"
+LIBPATH=(/usr/local/share/lua/5.1/ /usr/local/share/luajit-2.1.0-alpha/)
+LUAJIT_BIN="luajit-2.1.0-alpha -e 'require([[jit.opt]]).start([[minstitch=10000]])' -e 'package.path=[[/luact/?.lua;]]..package.path'"
+LUACT_PATH=
+PRELOADS=(libpthread.so.0 libjemalloc.so.1)	
+PRELOAD_LIBS=`join : ${PRELOADS[@]}`
+VERBOSE=
 LUACT_CONFIG=()
 DOCKER_CONFIG=()
-PRELOADS=(libpthread.so.0 libjemalloc.so.1)
-LUAJIT_BIN="luajit-2.1.0-alpha -e \"require('jit.opt').start('minstitch=10000')\""
-LUACT_PATH=
-NUM_CORE=
-VERBOSE=
-ADDRESS=
-BRIDGE=
 
 for i in "$@"
 do
 case $i in
-	--daemon)
-	DAEMON=yes
-	shift
-	;;
 	-v)
 	VERBOSE=yes
 	shift
@@ -115,45 +140,13 @@ case $i in
 	--version)
 	show_version
 	exit 0
-	;;	
-	-p)
-	LIBPATH[${#LIBPATH[@]}]=`abspath $2`
-	shift
-	shift
 	;;
 	--path=*)
 	LIBPATH[${#LIBPATH[@]}]=`abspath ${i#*=}`
 	shift
 	;;
-	-a)
-	ADDRESS=$2
-	shift
-	shift
-	;;
-	--address=*)
-	ADDRESS=${i#*=}
-	shift
-	;;
-	--bridge=*)
-	BRIDGE=${i#*=}
-	shift
-	;;
-	-i)
-	LUACT_IMAGE=$2
-	shift
-	shift
-	;;
-	--image=*)
-	LUACT_IMAGE=${i#*=}
-	shift
-	;;
-	-c)
-	NUM_CORE=$2
-	shift
-	shift
-	;;
-	--core=*)
-	NUM_CORE=${i#*=}
+	--luact=*)
+	LUACT_PATH=${i#*=}
 	shift
 	;;
 	-d)
@@ -177,36 +170,89 @@ case $i in
 	DATADIR="$WORKDIR/${i#*=}/data"
 	shift
 	;;
-	--luact=*)
-	LUACT_PATH=${i#*=}
-	shift
-	;;
-	-*)
-	echo "unknown option: $i"
+	--help)
 	usage
-	exit -1
-	;;
-	*.lua)
-	EXECFILE=$i
-	shift
-	;;
-	"run" | "build" | "setup")
+	exit 0
+	;;	
+	"run" | "node" | "sdn" | "build" | "setup")
 	SUBCOMMAND=$i
 	shift
 	;;
 esac
 done
 
-#echo "subc:$SUBCOMMAND"
-#️echo "daemon:$DAEMON"
-#️echo "libpath:${LIBPATH[@]}"
-#️echo "config:${LUACT_CONFIG[@]}"
-#echo "execfile:$EXECFILE"
-#echo "luajit:$LUAJIT_BIN"
 
+#===========================================
+# run command
+#===========================================
 function run {
+	local DAEMON=
+	local EXECFILE=
+	local LUACT_IMAGE="umegaya/luact:core"
+	local NUM_CORE=
+	local ADDRESS=
+	local BRIDGE=
+	for i in "$@"
+	do
+	case $i in
+		--daemon)
+		DAEMON=yes
+		shift
+		;;
+		-p)
+		LIBPATH[${#LIBPATH[@]}]=`abspath $2`
+		shift
+		shift
+		;;
+		-a)
+		ADDRESS=$2
+		shift
+		shift
+		;;
+		--address=*)
+		ADDRESS=${i#*=}
+		shift
+		;;
+		--bridge=*)
+		BRIDGE=${i#*=}
+		shift
+		;;
+		-i)
+		LUACT_IMAGE=$2
+		shift
+		shift
+		;;
+		--image=*)
+		LUACT_IMAGE=${i#*=}
+		shift
+		;;
+		-c)
+		NUM_CORE=$2
+		shift
+		shift
+		;;
+		--core=*)
+		NUM_CORE=${i#*=}
+		shift
+		;;
+		-*)
+		echo "unknown option: $i"
+		usage
+		exit -1
+		;;
+		*.lua)
+		EXECFILE=$i
+		shift
+		;;
+	esac
+	done
+	#echo "subc:$SUBCOMMAND"
+	#echo "daemon:$DAEMON"	️
+	#echo "libpath:${LIBPATH[@]}"
+	#echo "config:${LUACT_CONFIG[@]}"
+	#echo "execfile:$EXECFILE"
+	#echo "luajit:$LUAJIT_BIN"
 	local wd=`pwd`
-	local PRELOAD_LIBS=`join : ${PRELOADS[@]}`
 	local docker_options="--privileged -e LD_PRELOAD=$PRELOAD_LIBS -v $wd:$WORKDIR"
 	local luact_options="--datadir=$DATADIR"
 	if [ ${#LUACT_CONFIG[@]} -ne 0 ]; then
@@ -250,7 +296,7 @@ function run {
 	else
 		docker_options="$docker_options --rm"
 	fi
-	local cmd="cd $WORKDIR && $LUAJIT_BIN -e 'package.path=[[/luact/?.lua;]]..package.path' /luact/run.lua $1 $luact_options"
+	local cmd="cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $EXECFILE $luact_options"
 	# echo "cmdl:	docker run $docker_options $LUACT_IMAGE bash -c \"$cmd\""
 	if [ ! -z $DAEMON ]; then
 		CID=$(docker run $docker_options $LUACT_IMAGE bash -c "$cmd")
@@ -267,6 +313,91 @@ function run {
 	fi
 }
 
+
+
+#===========================================
+# build command
+#===========================================
+function build {
+	local BUILDERFILE=
+	local IMAGENAME=
+	local EXECFILE=main.lua
+	local PUSH=
+	for i in "$@"
+	do
+	case $i in
+		-f)
+		BUILDERFILE=$2
+		shift
+		shift
+		;;
+		-e)
+		EXECFILE=$2
+		shift
+		shift
+		;;
+		--push=*)
+		PUSH=on
+		shift
+		;;
+		*/*)
+		IMAGENAME=$i
+		shift
+		;;
+	esac
+	done
+	if [ -z $IMAGENAME ]; then
+		echo "image name must be specified"
+		exit -1
+	fi
+	local luact_options="--logdir=$LOGDIR --datadir=$DATADIR"
+	if [ ${#LUACT_CONFIG[@]} -ne 0 ]; then
+		for c in "${LUACT_CONFIG[@]}"
+		do
+			luact_options="$luact_options --$c"
+		done
+	fi
+	local docker_options="-t $IMAGENAME"
+	if [ -e "$BUILDERFILE" ]; then
+		docker_options="$docker_options -f $BUILDERFILE"
+	else
+		if [ ! -e "./Dockerfile" ]; then
+			BUILDERFILE=./Dockerfile
+			cat << __TEMPLATE__  > $BUILDERFILE
+FROM umegaya/luact:core
+ENV LD_PRELOAD=$PRELOAD_LIBS
+ADD . $WORKDIR
+CMD bash -c "cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $EXECFILE $luact_options"
+__TEMPLATE__
+		fi
+	fi
+	if [ ${#DOCKER_CONFIG[@]} -ne 0 ]; then
+		for c in "${DOCKER_CONFIG[@]}"
+		do
+			docker_options="$docker_options --$c"
+		done
+	fi
+	echo "cmdl: docker build $docker_options ."
+	docker build $docker_options .
+	if [ ! -z $PUSH ]; then
+		docker push $IMAGENAME
+	fi
+}
+
+
+
+#===========================================
+# node command
+#===========================================
+function node {
+	local N=3
+}
+
+
+
+#===========================================
+# setup command
+#===========================================
 function setup {
 	local N=3
 	if [ `uname` != "Darwin" ]; then
@@ -284,16 +415,23 @@ function setup {
 	boot2docker up
 }
 
-function build {
-	local image_name=$1
-}
 
+
+#===========================================
+#
+# bootstrap commands
+#
+#===========================================
 if [ "$SUBCOMMAND" = "run" ]; then
-	run $EXECFILE
+	run $@
 	exit 0
 fi
 if [ "$SUBCOMMAND" = "build" ]; then
-	build $EXECFILE
+	build $@
+	exit 0
+fi
+if [ "$SUBCOMMAND" = "node" ]; then
+	node $@
 	exit 0
 fi
 if [ "$SUBCOMMAND" = "setup" ]; then
