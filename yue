@@ -174,7 +174,7 @@ case $i in
 	usage
 	exit 0
 	;;	
-	"run" | "node" | "sdn" | "build" | "setup")
+	"run" | "node" | "sdn" | "build" | "setup" | "list")
 	SUBCOMMAND=$i
 	shift
 	;;
@@ -396,6 +396,15 @@ function node {
 
 
 #===========================================
+# list command
+#===========================================
+function list {
+	local N=3
+}
+
+
+
+#===========================================
 # setup command
 #===========================================
 function setup {
@@ -432,6 +441,10 @@ if [ "$SUBCOMMAND" = "build" ]; then
 fi
 if [ "$SUBCOMMAND" = "node" ]; then
 	node $@
+	exit 0
+fi
+if [ "$SUBCOMMAND" = "list" ]; then
+	list $@
 	exit 0
 fi
 if [ "$SUBCOMMAND" = "setup" ]; then
