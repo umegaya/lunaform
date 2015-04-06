@@ -1,11 +1,20 @@
-#!/bin/bash
+#!/bin/bash -eu
 
+#===========================================
+# pre-requisite
+#===========================================
 VERSION='0.1.0'
 DOCKER=`which docker`
 if [ -z $DOCKER ]; then
- echo "docker(https://www.docker.com) is required by yue"
+	echo "docker(https://www.docker.com) is required by yue"
 fi
 DOCKER_VERSION=`$DOCKER --version`
+
+MACHINE=`which docker-machine`
+if [ -z $MACHINE ]; then
+	echo "docker-machine(https://www.docker.com) is required by yue"
+fi
+MACHINE_VERSION=`$MACHINE --version`
 
 
 
@@ -27,15 +36,16 @@ common options:
     --help                          show this usage
 
 commands:
-    run {execfile}                  run specified {execfile} (default)
+	init {project name}             initialize project structure
+
+    run {execfile or image}         run specified {execfile(*.lua) or image(*/*:*)} (default)
         --daemon=false                  enable daemon mode. if -H is specified, this option is always true
-        -a,--address={address}          expose port of this yue program to {address}.
-        --bridge=br1                    specify bridge name which is used for assign ip address by -a option
         -p,--path　　                   add search path for lua libraries. same file path in local file system autometically mounted.
-        -i,--image="umegaya/luact:core" specify container image used for running script
         -d config=value                 pass configuration variable to docker. equivalent to give --config=value to docker
         -l config=value                 pass configuration variable to luact. equivalent to give --config=value to luact
         -c,--core=1                     specify number of luajit VM thread. default == number of CPU core
+        -n,--node={name}                specify node to run
+        -H
 
     build {image}                   build container image whose name is {imagename} with current setting
     	-f={file path}                  specify Dockerfile path (if it exists in ., yue autometically use it)
@@ -47,10 +57,10 @@ commands:
                                         if you use your dockerfile, it will be ignored.
         --push=false                    execute docker push {image} when build succeed.
 
-    node {name}                     create infrastructure of yue whose name is {machine} on various IaaS
-        -i={IaaS type}                  
-
-    sdn                             control network topology (use with node)
+    node {name}                     create infrastructure of yue whose name is {name} on various IaaS
+        -t,--type=any(amazonec2|azure|google|digitalocean|openstack|rackspace|softlayer|virtualbox|vmwarevcloudair|vmwarevsphere)
+                                        specify iaas type. if not specified, randomly selected entry in factory file is used.
+        -c="~/.yue/factory"             specify node factory json file. factory file describes provider account/preferred machine information of yue instances 
 
 __USAGE__
 }
@@ -84,58 +94,78 @@ function abspath {
 	local dir=`pwd`
 	echo ${1/\./$dir}
 }
-function assign_ip {
-	local bridge="br1"
-	if [ ! -z $3 ]; then
-		bridge=$3
-	fi
-	if [ `uname` = "Darwin" ]; then
-		local HAS_PIPEWORK=`boot2docker ssh [ -f "/var/lib/boot2docker/pipework" ] || echo "ng"`
-		if [ ! -z $HAS_PIPEWORK ]; then
-			git clone https://github.com/jpetazzo/pipework.git
-			scp -i ~/.ssh/id_boot2docker pipework/pipework docker@`boot2docker ip`:/var/lib/boot2docker/
-			rm -rf pipework
-		fi
-		boot2docker ssh sudo sh /var/lib/boot2docker/pipework $bridge $1 $2
+function remove_arg {
+	#echo "remove_arg:$@"
+	local from=`expr $1`
+	local to=`expr $2`
+	shift 2
+	#echo "from/to $from/$to"
+	if [ $from -eq 1 ]; then
+		#echo "${@:1:2}"
+		echo "${@:$((to+1)):$#}";
 	else
-		local HAS_PIPEWORK=[ -e "~/pipework" ] || echo "ng"
-		if [ ! -z $HAS_PIPEWORK ]; then
-			git clone https://github.com/jpetazzo/pipework.git
-			cp pipework/pipework ~
-			rm -rf pipework
+		if [ $to -eq $# ]; then
+			echo "${@:1:$((from-1))}";
+		else
+			echo "${@:1:$((from-1))} ${@:$((to+1)):$#}";
 		fi
-		sh ~/pipework $bridge $1 $2
 	fi
+}
+function work_node {
+	local dir=`pwd`
+	if [ -e "$dir/.yue/project" ]; then
+		cat $dir/.yue/project
+	else
+		echo ""
+	fi
+}
+function active_node {
+	if [ $# -ge 1 ]; then
+		echo "`work_node`.$1"
+	else
+		echo `work_node`
+	fi
+}
+function switch_to {
+	local nodename=`active_node $@`
+	#echo "switch_to:$nodename"
+	eval $(docker-machine env $nodename)
+}
+function fill_env_value {
+	echo $(eval echo $(cat $1 | sed 's/\"/\\"/g'))
 }
 
 
 
 #===========================================
-# common command line arguments
+# common command line arguments (bit tricky...)
 #===========================================
 SUBCOMMAND=run
-WORKDIR="/tmp/lunarsurface"
-LOGDIR="$WORKDIR/work/logs"
-DATADIR="$WORKDIR/work/data"
+WORKDIR="/lunarsurface"
+LOGDIR="$WORKDIR/logs"
+DATADIR="$WORKDIR/data"
 LIBPATH=(/usr/local/share/lua/5.1/ /usr/local/share/luajit-2.1.0-alpha/)
 LUAJIT_BIN="luajit-2.1.0-alpha -e 'require([[jit.opt]]).start([[minstitch=10000]])' -e 'package.path=[[/luact/?.lua;]]..package.path'"
 LUACT_PATH=
+LUACT_IMAGE="umegaya/luact:core"
 PRELOADS=(libpthread.so.0 libjemalloc.so.1)	
 PRELOAD_LIBS=`join : ${PRELOADS[@]}`
 VERBOSE=
 LUACT_CONFIG=()
 DOCKER_CONFIG=()
 
+cnt=1
 for i in "$@"
 do
+	#echo "$cnt[$@]"
 case $i in
 	-v)
 	VERBOSE=yes
-	shift
+	set -- `remove_arg $cnt $cnt $@`
 	;;
 	--verbose)
 	VERBOSE=yes
-	shift
+	set -- `remove_arg $cnt $cnt $@`
 	;;
 	--version)
 	show_version
@@ -143,43 +173,70 @@ case $i in
 	;;
 	--path=*)
 	LIBPATH[${#LIBPATH[@]}]=`abspath ${i#*=}`
-	shift
+	set -- `remove_arg $cnt $cnt $@`
 	;;
 	--luact=*)
 	LUACT_PATH=${i#*=}
-	shift
+	set -- `remove_arg $cnt $cnt $@`
 	;;
 	-d)
 	DOCKER_CONFIG[${#DOCKER_CONFIG[@]}]=$2
-	shift
-	shift
+	set -- `remove_arg $cnt $((cnt+1)) $@`
 	;;
 	-l)
 	LUACT_CONFIG[${#LUACT_CONFIG[@]}]=$2
-	shift
-	shift
+	set -- `remove_arg $cnt $((cnt+1)) $@`
 	;;
 	-w)
-	LOGDIR="$WORKDIR/$2/logs"
-	DATADIR="$WORKDIR/$2/data"
-	shift
-	shift
+	WORKDIR="$2"
+	LOGDIR="$WORKDIR/logs"
+	DATADIR="$WORKDIR/data"
+	set -- `remove_arg $cnt $((cnt+1)) $@`
 	;;
 	--workdir=*)
-	LOGDIR="$WORKDIR/${i#*=}/logs"
-	DATADIR="$WORKDIR/${i#*=}/data"
-	shift
+	WORKDIR="${i#*=}"
+	LOGDIR="$WORKDIR/logs"
+	DATADIR="$WORKDIR/data"
+	set -- `remove_arg $cnt $cnt $@`
 	;;
 	--help)
 	usage
 	exit 0
 	;;	
-	"run" | "node" | "sdn" | "build" | "setup" | "list")
+	"run" | "node" | "sdn" | "build" | "init")
 	SUBCOMMAND=$i
-	shift
+	set -- `remove_arg $cnt $cnt $@`
+	;;
+	*)
+	cnt=$((cnt+1))
 	;;
 esac
 done
+
+#echo "after process:$@"
+
+
+#===========================================
+# init command
+#===========================================
+function init {
+	local project=$1
+	if [ -z $project ]; then
+		echo "please speficy project name"
+		exit -1
+	fi
+	mkdir .yue
+	local node=`work_node`
+	if [ ! -z $node ]; then
+		if [ $node != $project ]; then
+			docker-machine rm $node
+		fi
+	fi
+	#echo "docker-machine create --driver virtualbox $project"
+	docker-machine create --driver virtualbox $project
+	echo "$project" > .yue/project
+}
+
 
 
 #===========================================
@@ -188,63 +245,52 @@ done
 function run {
 	local DAEMON=
 	local EXECFILE=
-	local LUACT_IMAGE="umegaya/luact:core"
+	local EXECIMAGE=
 	local NUM_CORE=
-	local ADDRESS=
-	local BRIDGE=
-	for i in "$@"
-	do
-	case $i in
-		--daemon)
-		DAEMON=yes
-		shift
-		;;
-		-p)
-		LIBPATH[${#LIBPATH[@]}]=`abspath $2`
-		shift
-		shift
-		;;
-		-a)
-		ADDRESS=$2
-		shift
-		shift
-		;;
-		--address=*)
-		ADDRESS=${i#*=}
-		shift
-		;;
-		--bridge=*)
-		BRIDGE=${i#*=}
-		shift
-		;;
-		-i)
-		LUACT_IMAGE=$2
-		shift
-		shift
-		;;
-		--image=*)
-		LUACT_IMAGE=${i#*=}
-		shift
-		;;
-		-c)
-		NUM_CORE=$2
-		shift
-		shift
-		;;
-		--core=*)
-		NUM_CORE=${i#*=}
-		shift
-		;;
-		-*)
-		echo "unknown option: $i"
-		usage
-		exit -1
-		;;
-		*.lua)
-		EXECFILE=$i
-		shift
-		;;
-	esac
+	local HOST=
+	while [ $# -gt 0 ]; do
+		case $1 in
+			--daemon)
+			DAEMON=yes
+			shift
+			;;
+			-p)
+			LIBPATH[${#LIBPATH[@]}]=`abspath $2`
+			shift
+			shift
+			;;
+			-c)
+			NUM_CORE=$2
+			shift
+			shift
+			;;
+			-H)
+			HOST=$2
+			shift
+			shift
+			;;
+			--host=*)
+			HOST=${1#*=}
+			shift
+			;;
+			--core=*)
+			NUM_CORE=${1#*=}
+			shift
+			;;
+			-*)
+			echo "unknown option: $1"
+			usage
+			exit -1
+			;;
+			*.lua)
+			EXECFILE=$1
+			shift
+			;;
+			*/*)
+			EXECIMAGE=$1
+			shift
+			;;
+		esac
 	done
 	#echo "subc:$SUBCOMMAND"
 	#echo "daemon:$DAEMON"	️
@@ -252,8 +298,7 @@ function run {
 	#echo "config:${LUACT_CONFIG[@]}"
 	#echo "execfile:$EXECFILE"
 	#echo "luajit:$LUAJIT_BIN"
-	local wd=`pwd`
-	local docker_options="--privileged -e LD_PRELOAD=$PRELOAD_LIBS -v $wd:$WORKDIR"
+	#echo "host:$HOST"
 	local luact_options="--datadir=$DATADIR"
 	if [ ${#LUACT_CONFIG[@]} -ne 0 ]; then
 		for c in "${LUACT_CONFIG[@]}"
@@ -267,6 +312,8 @@ function run {
 	if [ ! -z $VERBOSE ]; then
 		luact_options="$luact_options --verbose=true"
 	fi
+
+	local docker_options="--privileged -e LD_PRELOAD=$PRELOAD_LIBS --net=\"host\" -v `pwd`:$WORKDIR"
 	if [ ${#DOCKER_CONFIG[@]} -ne 0 ]; then
 		for c in "${DOCKER_CONFIG[@]}"
 		do
@@ -282,34 +329,33 @@ function run {
 	if [ ! -z $LUACT_PATH ]; then
 		docker_options="$docker_options -v $LUACT_PATH:/luact"
 	fi
-	if [ ! -z $ADDRESS ]; then
-		if [ -z $DAEMON ]; then
-			echo "-a only can use with -d"
-			exit -1
-		fi
-	else
-		docker_options="$docker_options --net=\"host\""
-	fi
 	if [ ! -z $DAEMON ]; then
 		docker_options="$docker_options -d"
 		luact_options="--logdir=$LOGDIR $luact_options"
 	else
-		docker_options="$docker_options --rm"
+		docker_options="$docker_options --rm -ti"
 	fi
-	local cmd="cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $EXECFILE $luact_options"
-	# echo "cmdl:	docker run $docker_options $LUACT_IMAGE bash -c \"$cmd\""
-	if [ ! -z $DAEMON ]; then
-		CID=$(docker run $docker_options $LUACT_IMAGE bash -c "$cmd")
-		echo $CID
-		if [ ! -z $ADDRESS ]; then
-			assign_ip $CID $ADDRESS $BRIDGE
-			if [ $? -ne 0 ]; then
-				echo "fail to setup address: $CID"
-				docker kill $CID
-			fi
+	switch_to $HOST
+	if [ ! -z $EXECFILE ]; then
+		local cmd="cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options $EXECFILE"
+		#echo "cmdl:	docker run $docker_options $LUACT_IMAGE bash -c \"$cmd\""
+		if [ ! -z $DAEMON ]; then
+			CID=$(docker run $docker_options $LUACT_IMAGE bash -c "$cmd")
+			echo $CID
+		else
+			docker run $docker_options $LUACT_IMAGE bash -c "$cmd"
 		fi
 	else
-		docker run $docker_options $LUACT_IMAGE bash -c "$cmd"
+		if [ ! -z $EXECIMAGE ]; then
+			if [ ! -z $DAEMON ]; then
+				CID=$(docker run $docker_options $EXECIMAGE)
+				echo $CID
+			else
+				docker run $docker_options $EXECIMAGE
+			fi
+		else
+			echo "either execute file or image must be specified"
+		fi
 	fi
 }
 
@@ -323,28 +369,27 @@ function build {
 	local IMAGENAME=
 	local EXECFILE=main.lua
 	local PUSH=
-	for i in "$@"
-	do
-	case $i in
-		-f)
-		BUILDERFILE=$2
-		shift
-		shift
-		;;
-		-e)
-		EXECFILE=$2
-		shift
-		shift
-		;;
-		--push=*)
-		PUSH=on
-		shift
-		;;
-		*/*)
-		IMAGENAME=$i
-		shift
-		;;
-	esac
+	while [ $# -gt 0 ]; do
+		case $1 in
+			-f)
+			BUILDERFILE=$2
+			shift
+			shift
+			;;
+			-e)
+			EXECFILE=$2
+			shift
+			shift
+			;;
+			--push=*)
+			PUSH=yes
+			shift
+			;;
+			*/*)
+			IMAGENAME=$1
+			shift
+			;;
+		esac
 	done
 	if [ -z $IMAGENAME ]; then
 		echo "image name must be specified"
@@ -367,7 +412,7 @@ function build {
 FROM umegaya/luact:core
 ENV LD_PRELOAD=$PRELOAD_LIBS
 ADD . $WORKDIR
-CMD bash -c "cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $EXECFILE $luact_options"
+CMD bash -c "cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options $EXECFILE"
 __TEMPLATE__
 		fi
 	fi
@@ -377,7 +422,8 @@ __TEMPLATE__
 			docker_options="$docker_options --$c"
 		done
 	fi
-	echo "cmdl: docker build $docker_options ."
+	#echo "cmdl: docker build $docker_options ."
+	switch_to
 	docker build $docker_options .
 	if [ ! -z $PUSH ]; then
 		docker push $IMAGENAME
@@ -390,7 +436,101 @@ __TEMPLATE__
 # node command
 #===========================================
 function node {
-	local N=3
+	local FACTORY_PATHS=(.yue/factory ~/.yue/factory)
+	local TYPE=
+	local FACTORY=
+	local NAME=
+	local SUBC=create
+	for c in "${FACTORY_PATHS[@]}"
+	do
+		if [ -e $c ]; then
+			if [ -z $FACTORY ]; then
+				FACTORY=$c
+			fi
+		fi
+	done
+	while [ $# -gt 0 ]; do
+		case $1 in
+			-t)
+			TYPE=$2
+			shift
+			shift
+			;;
+			--type=*)
+			TYPE=${1#*=}
+			shift
+			;;
+			-c)
+			FACTORY=$2
+			shift
+			shift
+			;;
+			--config=*)
+			FACTORY=${1#*=}
+			shift
+			;;
+			"create" | "rm" | "ls" )
+			SUBC=$1
+			shift
+			;;
+			*)
+			NAME=$1
+			shift
+			;;
+		esac
+	done
+	if [[ $SUBC != "ls" && -z $NAME ]]; then
+		echo "name should be specified"
+		exit -1
+	fi
+	
+	local docker_options="--rm -e LD_PRELOAD=$PRELOAD_LIBS -v `pwd`:$WORKDIR"
+	if [ ${#DOCKER_CONFIG[@]} -ne 0 ]; then
+		for c in "${DOCKER_CONFIG[@]}"
+		do
+			docker_options="$docker_options --$c"
+		done
+	fi
+	if [ ! -z $LUACT_PATH ]; then
+		docker_options="$docker_options -v $LUACT_PATH:/luact"
+	fi
+
+	local luact_options="--datadir=$DATADIR --logdir=$LOGDIR"
+	if [ ${#LUACT_CONFIG[@]} -ne 0 ]; then
+		for c in "${LUACT_CONFIG[@]}"
+		do
+			luact_options="$luact_options --$c"
+		done
+	fi
+
+	local cmd=
+	case $SUBC in
+		create)
+		local fullname=`active_node $NAME`
+		docker-machine ip $fullname 2>&1>/dev/null && [ $? == 0 ] && echo "$fullname already created" && exit 0
+		echo "create new machine for $fullname"
+		FACTORY=`fill_env_value $FACTORY`
+		cmd="cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options /luact/luact/bin/node.lua create $fullname $TYPE '${FACTORY}'"
+		;;
+		rm)
+		local fullname=`active_node $NAME`
+		cmd="cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options /luact/luact/bin/node.lua rm $fullname"
+		;;
+		ls)
+		cmd="cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options /luact/luact/bin/node.lua ls"
+		;;
+	esac
+	switch_to
+	#echo "cmdl: docker run $docker_options $LUACT_IMAGE bash -c \"$cmd\""
+	#eval `docker run $docker_options $LUACT_IMAGE bash -c "$cmd"`
+	#docker run $docker_options $LUACT_IMAGE bash -c "$cmd"
+	out=`docker run $docker_options $LUACT_IMAGE bash -c "$cmd"`
+	if [ $SUBC != 'ls' ]; then
+		eval $out
+	else
+		local wn=`work_node`
+		eval $out | grep $wn
+	fi
 }
 
 
@@ -405,32 +545,12 @@ function list {
 
 
 #===========================================
-# setup command
-#===========================================
-function setup {
-	local N=3
-	if [ `uname` != "Darwin" ]; then
-		echo "setup:unsupported platform"
-	fi
-	if [ -z $1 ]; then
-		echo "setup:please specify virtual box network if (vboxnet*)"
-	fi
-	if [ ! -z $2 ]; then
-		N=$2
-	fi
-	boot2docker down
-	VBoxManage modifyvm boot2docker-vm --nic$N hostonly --hostonlyadapter$N $1
-	VBoxManage modifyvm boot2docker-vm --nicpromisc$N allow-all
-	boot2docker up
-}
-
-
-
-#===========================================
-#
 # bootstrap commands
-#
 #===========================================
+if [ "$SUBCOMMAND" = "init" ]; then
+	init $@
+	exit 0
+fi
 if [ "$SUBCOMMAND" = "run" ]; then
 	run $@
 	exit 0
@@ -441,14 +561,6 @@ if [ "$SUBCOMMAND" = "build" ]; then
 fi
 if [ "$SUBCOMMAND" = "node" ]; then
 	node $@
-	exit 0
-fi
-if [ "$SUBCOMMAND" = "list" ]; then
-	list $@
-	exit 0
-fi
-if [ "$SUBCOMMAND" = "setup" ]; then
-	setup $1 $2
 	exit 0
 fi
 
