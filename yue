@@ -478,6 +478,9 @@ function node {
 			*)
 			NAME=$1
 			shift
+			if [ $SUBC == "ssh" ]; then
+				break
+			fi
 			;;
 		esac
 	done
@@ -523,7 +526,7 @@ function node {
 		;;
 		ssh)
 		local fullname=`active_node $NAME`
-		docker-machine ssh $fullname
+		docker-machine ssh $fullname $@
 		exit 0
 		;;
 	esac
