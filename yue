@@ -49,18 +49,20 @@ commands:
 
     build {image}                   build container image whose name is {imagename} with current setting
     	-f={file path}                  specify Dockerfile path (if it exists in ., yue autometically use it)
-        -p,--path　　                   add search path for lua libraries. same file path in local file system will be added to image. 
-                                        this option only enabled when no Dockerfile can be used. 
         -e=main.lua                     specify entry point of your application.
         -d config=value                 pass configuration variable to docker. equivalent to give --config=value to docker
         -l config=value                 pass configuration variable to luact, as command line argument to CMD directive when Dockerfile autometically generated. 
                                         if you use your dockerfile, it will be ignored.
-        --push=false                    execute docker push {image} when build succeed.
+        -p,--push=false                 execute docker push {image} when build succeed.
 
-    node {name}                     create infrastructure of yue whose name is {name} on various IaaS
+    node create {name}              create infrastructure of yue whose name is {name} on various IaaS
         -t,--type=any(amazonec2|azure|google|digitalocean|openstack|rackspace|softlayer|virtualbox|vmwarevcloudair|vmwarevsphere)
                                         specify iaas type. if not specified, randomly selected entry in factory file is used.
         -c="~/.yue/factory"             specify node factory json file. factory file describes provider account/preferred machine information of yue instances 
+
+    node rm {name}                  destroy yue node which name is {name}
+    node ls                         list nodes which created by the project
+    node ssh {name}                 login to node which name is {name}
 
 __USAGE__
 }
@@ -381,7 +383,7 @@ function build {
 			shift
 			shift
 			;;
-			--push=*)
+			"-p" | "--push")
 			PUSH=yes
 			shift
 			;;
@@ -469,7 +471,7 @@ function node {
 			FACTORY=${1#*=}
 			shift
 			;;
-			"create" | "rm" | "ls" )
+			"create" | "rm" | "ls" | "ssh")
 			SUBC=$1
 			shift
 			;;
@@ -518,6 +520,11 @@ function node {
 		;;
 		ls)
 		cmd="cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options /luact/luact/bin/node.lua ls"
+		;;
+		ssh)
+		local fullname=`active_node $NAME`
+		docker-machine ssh $fullname
+		exit 0
 		;;
 	esac
 	switch_to
