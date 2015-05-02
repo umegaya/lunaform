@@ -29,6 +29,7 @@ CA="$CERTPATH/ca.pem"
 CAKEY="$CERTPATH/ca-key.pem"
 CERT="$CERTPATH/cert.pem"
 CERTKEY="$CERTPATH/key.pem"
+ID_RSA="$CERTPATH/id_rsa"
 MACHINE_CMD="$MACHINE_BIN_NAME --storage-path=$MACHINEPATH --tls-ca-cert=$CA --tls-ca-key=$CAKEY --tls-client-cert=$CERT --tls-client-key=$CERTKEY"
 
 
@@ -169,6 +170,8 @@ function init_certs {
 		echo extendedKeyUsage = clientAuth > $CERTPATH/extfile.cnf
 		echo "=== create signed cert key by using ca"
 		$SSLTOOL x509 -req -days 36500 -in $CERTPATH/client.csr -CA $CA -CAkey $CAKEY -out $CERT -extfile $CERTPATH/extfile.cnf
+		echo "=== create common ssh key pair"
+		ssh-keygen -q -b 2048 -t rsa -N '' -f $ID_RSA
 		echo "=== remove unnecessary files"
 		rm -v $CERTPATH/client.csr $CERTPATH/server.csr $CERTPATH/extfile.cnf
 		echo "=== modify file permissions"
@@ -512,20 +515,19 @@ function run {
 # build command
 #===========================================
 function build {
-	local BUILDERFILE=
 	local IMAGENAME=
 	local EXECFILE=src/main.lua
 	local PUSH=
+	local NEW_BUILDER=
 	while [ $# -gt 0 ]; do
 		case $1 in
-			-f)
-			BUILDERFILE=$2
-			shift
-			shift
-			;;
 			-e)
 			EXECFILE=$2
 			shift
+			shift
+			;;
+			-n)
+			NEW_BUILDER=yes
 			shift
 			;;
 			"-p" | "--push")
@@ -555,25 +557,20 @@ function build {
 	fi
 	echo "re-copying files to build"
 	rm -rf build
-	for s in "${BUILD_SRCS[@]}"
-	do
-		mkdir -p build/$s
-		cp -r $s/* build/$s/
-	done
-	local docker_options="-t $IMAGENAME"
-	if [ -e "$BUILDERFILE" ]; then
-		cp $BUILDERFILE build/Dockerfile
-	else
-		if [ ! -e "./Dockerfile" ]; then
-			cat << __TEMPLATE__  > ./Dockerfile
+	git clone `git config --get remote.origin.url` --branch `git rev-parse --abbrev-ref HEAD` build
+	if [[ ! -e "./build/Dockerfile" || ! -z NEW_BUILDER ]]; then
+		cat << __TEMPLATE__  > ./Dockerfile
 FROM $LUACT_IMAGE
 ENV LD_PRELOAD=$PRELOAD_LIBS
 ADD . $WORKDIR
+RUN chmod 600 $WORKDIR/$ID_RSA && \  
+  echo "IdentityFile $WORKDIR/$ID_RSA" >> /etc/ssh/ssh_config && \  
+  echo "StrictHostKeyChecking no" >> /etc/ssh/ssh_config  
 CMD bash -c "cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options $EXECFILE"
 __TEMPLATE__
-		fi
-		cp ./Dockerfile build/Dockerfile
+		cp ./Dockerfile ./build/Dockerfile
 	fi
+	local docker_options="-t $IMAGENAME"
 	if [ ${#DOCKER_CONFIG[@]} -ne 0 ]; then
 		for c in "${DOCKER_CONFIG[@]}"
 		do
@@ -581,12 +578,12 @@ __TEMPLATE__
 		done
 	fi
 	#echo "cmdl: docker build $docker_options ."
-	switch_to
+	switch_to # default
 	docker build $docker_options build
 	if [ ! -z $PUSH ]; then
 		docker push $IMAGENAME
 	fi
-	rm -rf build
+	# rm -rf build
 }
 
 
@@ -628,7 +625,7 @@ function node {
 			FACTORY=${1#*=}
 			shift
 			;;
-			"create" | "rm" | "ls" | "ssh")
+			"create" | "rm" | "ls" | "ssh" | "env")
 			SUBC=$1
 			shift
 			;;
@@ -641,7 +638,7 @@ function node {
 			;;
 		esac
 	done
-	if [[ $SUBC != "ls" && $SUBC != "ssh" && -z $NAME ]]; then
+	if [[ $SUBC != "ls" && $SUBC != "ssh" && $SUBC != "env" && -z $NAME ]]; then
 		echo "name should be specified"
 		exit -1
 	fi
@@ -679,6 +676,10 @@ function node {
 		;;
 		ls)
 		cmd="cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options /luact/luact/bin/node.lua ls"
+		;;
+		env)
+		$MACHINE_CMD env $fullname
+		exit 0
 		;;
 		ssh)
 		$MACHINE_CMD ssh $fullname $@
