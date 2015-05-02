@@ -239,7 +239,8 @@ DATADIR="$WORKDIR/data"
 LIBPATH=(/usr/local/share/lua/5.1/ /usr/local/share/luajit-2.1.0-alpha/)
 LUAJIT_BIN="luajit-2.1.0-alpha -e 'require([[jit.opt]]).start([[minstitch=10000]])' -e 'package.path=[[/luact/?.lua;]]..package.path'"
 LUACT_PATH=
-IMAGE_DIGEST="sha256:5b4bdc1f3b627e3d0c61c6f93233d94051e0216add563eb65f91f4eeb3062667"
+IMAGE_DIGEST="sha256:297346e498db363e779fcd9a78f59c6eea553235cfe26a37def2ffe599f47f6e"
+#prev: sha256:ef061a49ca96a97d252568a92a8fcf6042a4b3b513b5227e27d5ac7d771691cd
 LUACT_IMAGE="umegaya/luact@$IMAGE_DIGEST"
 PRELOADS=(libpthread.so.0 libjemalloc.so.1)	
 PRELOAD_LIBS=`join : ${PRELOADS[@]}`
@@ -434,21 +435,12 @@ function run {
 		luact_options="$luact_options --verbose=true"
 	fi
 
-	local docker_options="--privileged -e LD_PRELOAD=$PRELOAD_LIBS --net=\"host\" -v `pwd`:$WORKDIR"
+	local docker_options="--privileged -e LD_PRELOAD=$PRELOAD_LIBS --net=\"host\""
 	if [ ${#DOCKER_CONFIG[@]} -ne 0 ]; then
 		for c in "${DOCKER_CONFIG[@]}"
 		do
 			docker_options="$docker_options --$c"
 		done
-	fi
-	if [ ${#LIBPATH[@]} -ne 0 ]; then
-		for p in "${LIBPATH[@]}"
-		do
-			docker_options="$docker_options -v $p:$p"
-		done
-	fi
-	if [ ! -z $LUACT_PATH ]; then
-		docker_options="$docker_options -v $LUACT_PATH:/luact"
 	fi
 	if [ ! -z $DAEMON ]; then
 		docker_options="$docker_options -d --name $CONTAINER_NAME"
@@ -464,8 +456,18 @@ function run {
 		docker rm $CONTAINER_NAME >& /dev/null
 	fi
 	if [ ! -z $EXECFILE ]; then
+		docker_options="$docker_options -v `pwd`:$WORKDIR"
+		if [ ${#LIBPATH[@]} -ne 0 ]; then
+			for p in "${LIBPATH[@]}"
+			do
+				docker_options="$docker_options -v $p:$p"
+			done
+		fi
+		if [ ! -z $LUACT_PATH ]; then
+			docker_options="$docker_options -v $LUACT_PATH:/luact"
+		fi
 		local cmd="cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options $EXECFILE"
-		#echo "cmdl:	docker run $docker_options $LUACT_IMAGE bash -c \"$cmd\""
+		echo "cmdl:	docker run $docker_options $LUACT_IMAGE bash -c \"$cmd\""
 		if [ ! -z $DAEMON ]; then
 			CID=$(docker run $docker_options $LUACT_IMAGE bash -c "$cmd")
 			echo $CID
@@ -478,6 +480,7 @@ function run {
 				CID=$(docker run $docker_options $EXECIMAGE)
 				echo $CID
 			else
+				echo "docker run $docker_options $EXECIMAGE"
 				docker run $docker_options $EXECIMAGE
 			fi
 		else
@@ -666,16 +669,12 @@ function node {
 		;;
 	esac
 	switch_to
-	echo "cmdl: docker run $docker_options $LUACT_IMAGE bash -c \"$cmd\""
+	#echo "cmdl: docker run $docker_options $LUACT_IMAGE bash -c \"$cmd\" | sed -e 's/docker-machine/$MACHINE_CMD/g'"
 	#eval `docker run $docker_options $LUACT_IMAGE bash -c "$cmd"`
 	#docker run $docker_options $LUACT_IMAGE bash -c "$cmd"
-	out=`docker run $docker_options $LUACT_IMAGE bash -c "$cmd"`
-	if [ $SUBC != 'ls' ]; then
-		eval $out
-	else
-		local wn=`work_node`
-		eval $out | grep $wn
-	fi
+	local out=`docker run $docker_options $LUACT_IMAGE bash -c "$cmd" | sed -e 's/docker-machine/$MACHINE_CMD/g'`
+	#echo "cmd out:$out"
+	eval $out
 }
 
 
