@@ -59,6 +59,7 @@ commands:
         -l config=value                 pass configuration variable to luact. equivalent to give --config=value to luact
         -c,--core=1                     specify number of luajit VM thread. default == number of CPU core
         -n,--node={name}                specify node to run
+        -m,--mount={path}               mount log and data to {path} on host machine
         -H
 
     build {image}                   build container image whose name is {imagename} with current setting
@@ -249,11 +250,13 @@ LUACT_CONFIG=(ssl.pubkey=$CERTPATH/server.pem ssl.privkey=$CERTPATH/server-key.p
 DOCKER_CONFIG=()
 BUILD_SRCS=(.yue/certs src)
 
+# parse common argument
 cnt=1
-for i in "$@"
+next_cnt=
+while [ ! -z "${!cnt:-}" ]
 do
-	# echo "$cnt[$@]"
-case $i in
+	#echo "[$@][${!cnt}]"
+case ${!cnt} in
 	-v)
 	VERBOSE=yes
 	set -- `remove_arg $cnt $cnt $@`
@@ -267,29 +270,32 @@ case $i in
 	exit 0
 	;;
 	--path=*)
-	LIBPATH[${#LIBPATH[@]}]=`abspath ${i#*=}`
+	LIBPATH[${#LIBPATH[@]}]=`abspath ${!cnt#*=}`
 	set -- `remove_arg $cnt $cnt $@`
 	;;
 	--luact=*)
-	LUACT_PATH=${i#*=}
+	LUACT_PATH=${1#*=}
 	set -- `remove_arg $cnt $cnt $@`
 	;;
 	-d)
-	DOCKER_CONFIG[${#DOCKER_CONFIG[@]}]=$2
+	next_cnt=$((cnt+1))
+	DOCKER_CONFIG[${#DOCKER_CONFIG[@]}]=${!next_cnt}
 	set -- `remove_arg $cnt $((cnt+1)) $@`
 	;;
 	-l)
-	LUACT_CONFIG[${#LUACT_CONFIG[@]}]=$2
+	next_cnt=$((cnt+1))
+	LUACT_CONFIG[${#LUACT_CONFIG[@]}]=${!next_cnt}
 	set -- `remove_arg $cnt $((cnt+1)) $@`
 	;;
 	-w)
-	WORKDIR="$2"
+	next_cnt=$((cnt+1))
+	WORKDIR=${!next_cnt}
 	LOGDIR="$WORKDIR/logs"
 	DATADIR="$WORKDIR/data"
 	set -- `remove_arg $cnt $((cnt+1)) $@`
 	;;
 	--workdir=*)
-	WORKDIR="${i#*=}"
+	WORKDIR="${!cnt#*=}"
 	LOGDIR="$WORKDIR/logs"
 	DATADIR="$WORKDIR/data"
 	set -- `remove_arg $cnt $cnt $@`
@@ -299,7 +305,7 @@ case $i in
 	exit 0
 	;;	
 	"run" | "node" | "sdn" | "build" | "init")
-	SUBCOMMAND=$i
+	SUBCOMMAND=${!cnt}
 	set -- `remove_arg $cnt $cnt $@`
 	;;
 	*)
@@ -362,6 +368,7 @@ function run {
 	local EXECIMAGE=
 	local NUM_CORE=
 	local HOST=
+	local MOUNT_PATH=`pwd`
 	while [ $# -gt 0 ]; do
 		case $1 in
 			--daemon*)
@@ -384,6 +391,15 @@ function run {
 			-c)
 			NUM_CORE=$2
 			shift
+			shift
+			;;
+			-m)
+			MOUNT_PATH=$2
+			shift
+			shift
+			;;
+			--mount=*)
+			MOUNT_PATH=${1#*=}
 			shift
 			;;
 			-H)
@@ -453,10 +469,10 @@ function run {
 		# TODO : change this to the command for shutdown entire cluster
 		# it will be achieved by running another container to invoke shutdown command to yue server
 		docker kill $CONTAINER_NAME >& /dev/null
-		docker rm $CONTAINER_NAME >& /dev/null
+		docker rm -v $CONTAINER_NAME >& /dev/null
 	fi
 	if [ ! -z $EXECFILE ]; then
-		docker_options="$docker_options -v `pwd`:$WORKDIR"
+		docker_options="$docker_options -v $MOUNT_PATH:$WORKDIR"
 		if [ ${#LIBPATH[@]} -ne 0 ]; then
 			for p in "${LIBPATH[@]}"
 			do
@@ -467,7 +483,7 @@ function run {
 			docker_options="$docker_options -v $LUACT_PATH:/luact"
 		fi
 		local cmd="cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options $EXECFILE"
-		echo "cmdl:	docker run $docker_options $LUACT_IMAGE bash -c \"$cmd\""
+		#echo "cmdl:	docker run $docker_options $LUACT_IMAGE bash -c \"$cmd\""
 		if [ ! -z $DAEMON ]; then
 			CID=$(docker run $docker_options $LUACT_IMAGE bash -c "$cmd")
 			echo $CID
@@ -475,12 +491,13 @@ function run {
 			docker run $docker_options $LUACT_IMAGE bash -c "$cmd"
 		fi
 	else
+		# TODO : we should give default mount point of data/logs in container?
+		# now user explicitly specify like -d volume=/data:/lunarsurface/data and -d volume=/logs:/lunarsurface/logs.
 		if [ ! -z $EXECIMAGE ]; then
 			if [ ! -z $DAEMON ]; then
 				CID=$(docker run $docker_options $EXECIMAGE)
 				echo $CID
 			else
-				echo "docker run $docker_options $EXECIMAGE"
 				docker run $docker_options $EXECIMAGE
 			fi
 		else
