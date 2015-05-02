@@ -7,15 +7,29 @@ VERSION='0.1.0'
 DOCKER=`which docker`
 if [ -z $DOCKER ]; then
 	echo "docker(https://www.docker.com) is required by yue"
+	exit -1
 fi
 DOCKER_VERSION=`$DOCKER --version`
-
-MACHINE=`which docker-machine`
+if [ `uname` = "Darwin" ]; then
+	MACHINE_BIN_NAME=${DOCKER_MACHINE:-docker-machine_darwin-amd64}
+else
+	MACHINE_BIN_NAME=${DOCKER_MACHINE:-docker-machine_linux-amd64}
+fi
+MACHINE=`which $MACHINE_BIN_NAME`
 if [ -z $MACHINE ]; then
 	echo "docker-machine(https://www.docker.com) is required by yue"
+	exit -2
 fi
+BOOT2DOCKER_URL="https://github.com/boot2docker/boot2docker/releases/download/v1.6.0/boot2docker.iso"
 MACHINE_VERSION=`$MACHINE --version`
-
+CERTPATH=.yue/certs
+MACHINEPATH=.yue/machine
+SSLTOOL=openssl
+CA="$CERTPATH/ca.pem"
+CAKEY="$CERTPATH/ca-key.pem"
+CERT="$CERTPATH/cert.pem"
+CERTKEY="$CERTPATH/key.pem"
+MACHINE_CMD="$MACHINE_BIN_NAME --storage-path=$MACHINEPATH --tls-ca-cert=$CA --tls-ca-key=$CAKEY --tls-client-cert=$CERT --tls-client-key=$CERTKEY"
 
 
 #===========================================
@@ -68,7 +82,6 @@ __USAGE__
 }
 
 
-
 #===========================================
 # version
 #===========================================
@@ -79,13 +92,12 @@ __  ____ __ __    ____
  \ \/ / | | | | / /
   \  /  | | | | ~~~~~~~~ version $VERSION
  _/ /   \ \_/ / \ \___   $DOCKER_VERSION
- \_/     \___/   \____/  
+ \_/     \___/   \____/  $MACHINE_VERSION
 it is brilliant on the cloud
 	
 (c)2014 - 2015 Takehiro Iyatomi(iyatomi@gmail.com)
 __VERSION__
 }
-
 
 
 #===========================================
@@ -130,14 +142,92 @@ function active_node {
 }
 function switch_to {
 	local nodename=`active_node $@`
-	#echo "switch_to:$nodename"
-	eval $(docker-machine env $nodename)
+	echo "switch_to:$nodename"
+	eval $($MACHINE_CMD env $nodename)
 }
 function fill_env_value {
 	echo $(eval echo $(cat $1 | sed 's/\"/\\"/g'))
 }
 
+function init_certs {
+	if [ ! -e $CERTPATH ]; then
+		mkdir -p $CERTPATH
+		echo "=== create ca / ca key" # create ca files with no credential
+		$SSLTOOL req -nodes -new -x509 -days 36500 -sha256 -keyout $CAKEY -out $CA
+		echo "=== create server cert key"
+		$SSLTOOL genrsa -out $CERTPATH/server-key.pem 2048
+		echo "=== create server cert key signing request"
+		$SSLTOOL req -subj "/CN=server" -new -key $CERTPATH/server-key.pem -out $CERTPATH/server.csr
+		echo "=== create signed server cert key by using ca"
+		$SSLTOOL x509 -req -days 36500 -in $CERTPATH/server.csr -CA $CA -CAkey $CAKEY -out $CERTPATH/server.pem
+		echo "=== create cert key"
+		$SSLTOOL genrsa -out $CERTKEY 2048
+		echo "=== create cert key signing request"
+		$SSLTOOL req -subj '/CN=client' -new -key $CERTKEY -out $CERTPATH/client.csr
+		echo "=== create extfile.cnf"
+		echo extendedKeyUsage = clientAuth > $CERTPATH/extfile.cnf
+		echo "=== create signed cert key by using ca"
+		$SSLTOOL x509 -req -days 36500 -in $CERTPATH/client.csr -CA $CA -CAkey $CAKEY -out $CERT -extfile $CERTPATH/extfile.cnf
+		echo "=== remove unnecessary files"
+		rm -v $CERTPATH/client.csr $CERTPATH/server.csr $CERTPATH/extfile.cnf
+		echo "=== modify file permissions"
+		chmod -v 0400 $CAKEY $CERTKEY
+		chmod -v 0444 $CA $CERT
+	fi
+}
 
+function init_factory {
+	if [ ! -e .yue/factory ]; then
+		echo "create factory"
+		cat << "__FACTORY_TEMPLATE__"  > .yue/factory
+{
+	"amazonec2": {
+		"access-key": "$AWS_ACCESS_KEY", 
+		"secret-key": "$AWS_SECRET_KEY",
+		"region": "$EC2_REGION",
+		"zone": "c",
+		"vpc-id": "$AWS_VPC_ID",
+		"ami": "ami-50eaed51"
+	},
+	"virtualbox": {
+	}
+}
+__FACTORY_TEMPLATE__
+	fi
+}
+
+function init_ignore {
+	if [ ! -e .gitignore ]; then
+		cat << __IGNORE_TEMPLATE__  > .gitignore
+*.iso
+*.vmdk
+logs
+data
+__IGNORE_TEMPLATE__
+	fi
+}
+
+function ignore_under {
+	pushd $1
+		if [ ! -e .gitignore ]; then
+			cat << __IGNORE_TEMPLATE__ > .gitignore
+*
+__IGNORE_TEMPLATE__
+		fi
+	popd
+}
+
+# run docker work space
+WORK_NODE=`work_node`
+if [ ! -z $WORK_NODE ]; then
+	#echo "$MACHINE_CMD url `work_node`"
+	$MACHINE_CMD url $WORK_NODE >& /dev/null
+	if [ $? -ne 0 ]; then
+		echo "start dev machine..."
+		$MACHINE_CMD start $WORK_NODE
+		echo "done"
+	fi
+fi
 
 #===========================================
 # common command line arguments (bit tricky...)
@@ -149,17 +239,19 @@ DATADIR="$WORKDIR/data"
 LIBPATH=(/usr/local/share/lua/5.1/ /usr/local/share/luajit-2.1.0-alpha/)
 LUAJIT_BIN="luajit-2.1.0-alpha -e 'require([[jit.opt]]).start([[minstitch=10000]])' -e 'package.path=[[/luact/?.lua;]]..package.path'"
 LUACT_PATH=
-LUACT_IMAGE="umegaya/luact:core"
+IMAGE_DIGEST="sha256:5b4bdc1f3b627e3d0c61c6f93233d94051e0216add563eb65f91f4eeb3062667"
+LUACT_IMAGE="umegaya/luact@$IMAGE_DIGEST"
 PRELOADS=(libpthread.so.0 libjemalloc.so.1)	
 PRELOAD_LIBS=`join : ${PRELOADS[@]}`
 VERBOSE=
-LUACT_CONFIG=()
+LUACT_CONFIG=(ssl.pubkey=$CERTPATH/server.pem ssl.privkey=$CERTPATH/server-key.pem)
 DOCKER_CONFIG=()
+BUILD_SRCS=(.yue/certs src)
 
 cnt=1
 for i in "$@"
 do
-	#echo "$cnt[$@]"
+	# echo "$cnt[$@]"
 case $i in
 	-v)
 	VERBOSE=yes
@@ -227,16 +319,33 @@ function init {
 		echo "please speficy project name"
 		exit -1
 	fi
-	mkdir .yue
+	init_certs
+	init_factory
+	init_ignore
 	local node=`work_node`
 	if [ ! -z $node ]; then
 		if [ $node != $project ]; then
-			docker-machine rm $node
+			$MACHINE_CMD rm $node
 		fi
 	fi
-	#echo "docker-machine create --driver virtualbox $project"
-	docker-machine create --driver virtualbox $project
+	mkdir -p $MACHINEPATH/cache
+	if [ ! -e $MACHINEPATH/cache/boot2docker.iso ]; then
+		curl -L $BOOT2DOCKER_URL -o $MACHINEPATH/cache/boot2docker.iso
+	fi
+	# echo "$MACHINE_CMD create --driver virtualbox $project"
+	$MACHINE_CMD create --driver virtualbox $project
+	ignore_under $MACHINEPATH/machines/$project
+	if [ ! -e $MACHINEPATH/.gitignore ]; then
+		cat << __IGNORE_TEMPLATE__ > $MACHINEPATH/.gitignore
+machines/.active
+cache
+__IGNORE_TEMPLATE__
+	fi
+	# setup remain file structure
 	echo "$project" > .yue/project
+	if [ ! -e src ]; then
+		mkdir src
+	fi
 }
 
 
@@ -246,14 +355,24 @@ function init {
 #===========================================
 function run {
 	local DAEMON=
+	local CONTAINER_NAME=yue
+	local RESTART=
 	local EXECFILE=
 	local EXECIMAGE=
 	local NUM_CORE=
 	local HOST=
 	while [ $# -gt 0 ]; do
 		case $1 in
-			--daemon)
+			--daemon*)
 			DAEMON=yes
+			shift
+			;;
+			--name=*)
+			CONTAINER_NAME=${1#*=}
+			shift
+			;;
+			--restart*)
+			RESTART=yes
 			shift
 			;;
 			-p)
@@ -332,12 +451,18 @@ function run {
 		docker_options="$docker_options -v $LUACT_PATH:/luact"
 	fi
 	if [ ! -z $DAEMON ]; then
-		docker_options="$docker_options -d"
+		docker_options="$docker_options -d --name $CONTAINER_NAME"
 		luact_options="--logdir=$LOGDIR $luact_options"
 	else
 		docker_options="$docker_options --rm -ti"
 	fi
 	switch_to $HOST
+	if [ ! -z $RESTART ]; then
+		# TODO : change this to the command for shutdown entire cluster
+		# it will be achieved by running another container to invoke shutdown command to yue server
+		docker kill $CONTAINER_NAME >& /dev/null
+		docker rm $CONTAINER_NAME >& /dev/null
+	fi
 	if [ ! -z $EXECFILE ]; then
 		local cmd="cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options $EXECFILE"
 		#echo "cmdl:	docker run $docker_options $LUACT_IMAGE bash -c \"$cmd\""
@@ -369,7 +494,7 @@ function run {
 function build {
 	local BUILDERFILE=
 	local IMAGENAME=
-	local EXECFILE=main.lua
+	local EXECFILE=src/main.lua
 	local PUSH=
 	while [ $# -gt 0 ]; do
 		case $1 in
@@ -386,6 +511,10 @@ function build {
 			"-p" | "--push")
 			PUSH=yes
 			shift
+			;;
+			*.lua)
+			echo "should specify image name (user/name:tag)"
+			exit -3
 			;;
 			*/*)
 			IMAGENAME=$1
@@ -404,19 +533,26 @@ function build {
 			luact_options="$luact_options --$c"
 		done
 	fi
+	echo "re-copying files to build"
+	rm -rf build
+	for s in "${BUILD_SRCS[@]}"
+	do
+		mkdir -p build/$s
+		cp -r $s/* build/$s/
+	done
 	local docker_options="-t $IMAGENAME"
 	if [ -e "$BUILDERFILE" ]; then
-		docker_options="$docker_options -f $BUILDERFILE"
+		cp $BUILDERFILE build/Dockerfile
 	else
 		if [ ! -e "./Dockerfile" ]; then
-			BUILDERFILE=./Dockerfile
-			cat << __TEMPLATE__  > $BUILDERFILE
-FROM umegaya/luact:core
+			cat << __TEMPLATE__  > ./Dockerfile
+FROM $LUACT_IMAGE
 ENV LD_PRELOAD=$PRELOAD_LIBS
 ADD . $WORKDIR
 CMD bash -c "cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options $EXECFILE"
 __TEMPLATE__
 		fi
+		cp ./Dockerfile build/Dockerfile
 	fi
 	if [ ${#DOCKER_CONFIG[@]} -ne 0 ]; then
 		for c in "${DOCKER_CONFIG[@]}"
@@ -426,10 +562,11 @@ __TEMPLATE__
 	fi
 	#echo "cmdl: docker build $docker_options ."
 	switch_to
-	docker build $docker_options .
+	docker build $docker_options build
 	if [ ! -z $PUSH ]; then
 		docker push $IMAGENAME
 	fi
+	rm -rf build
 }
 
 
@@ -484,7 +621,7 @@ function node {
 			;;
 		esac
 	done
-	if [[ $SUBC != "ls" && -z $NAME ]]; then
+	if [[ $SUBC != "ls" && $SUBC != "ssh" && -z $NAME ]]; then
 		echo "name should be specified"
 		exit -1
 	fi
@@ -509,29 +646,27 @@ function node {
 	fi
 
 	local cmd=
+	local fullname=`active_node $NAME`
 	case $SUBC in
 		create)
-		local fullname=`active_node $NAME`
-		docker-machine ip $fullname 2>&1>/dev/null && [ $? == 0 ] && echo "$fullname already created" && exit 0
+		$MACHINE_CMD ip $fullname 2>&1>/dev/null && [ $? == 0 ] && echo "$fullname already created" && exit 0
 		echo "create new machine for $fullname"
 		FACTORY=`fill_env_value $FACTORY`
 		cmd="cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options /luact/luact/bin/node.lua create $fullname $TYPE '${FACTORY}'"
 		;;
 		rm)
-		local fullname=`active_node $NAME`
 		cmd="cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options /luact/luact/bin/node.lua rm $fullname"
 		;;
 		ls)
 		cmd="cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options /luact/luact/bin/node.lua ls"
 		;;
 		ssh)
-		local fullname=`active_node $NAME`
-		docker-machine ssh $fullname $@
+		$MACHINE_CMD ssh $fullname $@
 		exit 0
 		;;
 	esac
 	switch_to
-	#echo "cmdl: docker run $docker_options $LUACT_IMAGE bash -c \"$cmd\""
+	echo "cmdl: docker run $docker_options $LUACT_IMAGE bash -c \"$cmd\""
 	#eval `docker run $docker_options $LUACT_IMAGE bash -c "$cmd"`
 	#docker run $docker_options $LUACT_IMAGE bash -c "$cmd"
 	out=`docker run $docker_options $LUACT_IMAGE bash -c "$cmd"`
