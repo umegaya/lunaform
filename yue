@@ -30,6 +30,7 @@ CAKEY="$CERTPATH/ca-key.pem"
 CERT="$CERTPATH/cert.pem"
 CERTKEY="$CERTPATH/key.pem"
 ID_RSA="$CERTPATH/id_rsa"
+SSH_CONFIG="$CERTPATH/config"
 MACHINE_CMD="$MACHINE_BIN_NAME --storage-path=$MACHINEPATH --tls-ca-cert=$CA --tls-ca-key=$CAKEY --tls-client-cert=$CERT --tls-client-key=$CERTKEY"
 
 
@@ -59,15 +60,13 @@ commands:
         -d config=value                 pass configuration variable to docker. equivalent to give --config=value to docker
         -l config=value                 pass configuration variable to luact. equivalent to give --config=value to luact
         -c,--core=1                     specify number of luajit VM thread. default == number of CPU core
-        -n,--node={name}                specify node to run
-        -m,--mount={path}               mount log and data to {path} on host machine
-        -H
+        -m,--mount={path}               mount log and data to {path} on host machine. `pwd` is used as default.
+        -H,--host=                      specify node name to run application. if omitted, default machine (name is same as project name) will be used
 
-    build {image}                   build container image whose name is {imagename} with current setting
-    	-f={file path}                  specify Dockerfile path (if it exists in ., yue autometically use it)
-        -e=main.lua                     specify entry point of your application.
+    build {image}                   build container image whose name is {imagename} with current setting. it generates Dockerfile if not exist in repo.
+        -e=src/main.lua                 specify entry point of your application.
         -d config=value                 pass configuration variable to docker. equivalent to give --config=value to docker
-        -l config=value                 pass configuration variable to luact, as command line argument to CMD directive when Dockerfile autometically generated. 
+        -l config=value                 pass configuration variable to luact, as command line argument to CMD directive of Dockerfile when its autometically generated. 
                                         if you use your dockerfile, it will be ignored.
         -p,--push=false                 execute docker push {image} when build succeed.
 
@@ -79,6 +78,7 @@ commands:
     node rm {name}                  destroy yue node which name is {name}
     node ls                         list nodes which created by the project
     node ssh {name}                 login to node which name is {name}
+    node env {name}                 output "eval-able" shell code for connecting to the node which name is {name}
 
 __USAGE__
 }
@@ -111,21 +111,16 @@ function abspath {
 	echo ${1/\./$dir}
 }
 function remove_arg {
-	#echo "remove_arg:$@"
-	local from=`expr $1`
-	local to=`expr $2`
+	local from=`expr $1-1`
+	local to=`expr $2-1`
 	shift 2
-	#echo "from/to $from/$to"
-	if [ $from -eq 1 ]; then
-		#echo "${@:1:2}"
-		echo "${@:$((to+1)):$#}";
-	else
-		if [ $to -eq $# ]; then
-			echo "${@:1:$((from-1))}";
-		else
-			echo "${@:1:$((from-1))} ${@:$((to+1)):$#}";
-		fi
-	fi
+	local array=( "$@" )
+	for ((i=from;i<=to;i++))
+	do
+		unset -v array[i]
+	done
+	# echo silently eat "-n" 
+	printf "%s" "${array[*]}"
 }
 function work_node {
 	local dir=`pwd`
@@ -172,6 +167,12 @@ function init_certs {
 		$SSLTOOL x509 -req -days 36500 -in $CERTPATH/client.csr -CA $CA -CAkey $CAKEY -out $CERT -extfile $CERTPATH/extfile.cnf
 		echo "=== create common ssh key pair"
 		ssh-keygen -q -b 2048 -t rsa -N '' -f $ID_RSA
+		echo "=== create ssh config"
+		cat << __CONFIG_TEMPLATE__  > $SSH_CONFIG
+Host *
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+__CONFIG_TEMPLATE__
 		echo "=== remove unnecessary files"
 		rm -v $CERTPATH/client.csr $CERTPATH/server.csr $CERTPATH/extfile.cnf
 		echo "=== modify file permissions"
@@ -189,7 +190,7 @@ function init_factory {
 		"access-key": "$AWS_ACCESS_KEY", 
 		"secret-key": "$AWS_SECRET_KEY",
 		"region": "$EC2_REGION",
-		"zone": "c",
+		"zone": "$EC2_ZONE",
 		"vpc-id": "$AWS_VPC_ID",
 		"ami": "ami-50eaed51"
 	},
@@ -207,6 +208,7 @@ function init_ignore {
 *.vmdk
 logs
 data
+build
 __IGNORE_TEMPLATE__
 	fi
 }
@@ -243,15 +245,15 @@ DATADIR="$WORKDIR/data"
 LIBPATH=(/usr/local/share/lua/5.1/ /usr/local/share/luajit-2.1.0-alpha/)
 LUAJIT_BIN="luajit-2.1.0-alpha -e 'require([[jit.opt]]).start([[minstitch=10000]])' -e 'package.path=[[/luact/?.lua;]]..package.path'"
 LUACT_PATH=
-IMAGE_DIGEST="sha256:297346e498db363e779fcd9a78f59c6eea553235cfe26a37def2ffe599f47f6e"
-#prev: sha256:ef061a49ca96a97d252568a92a8fcf6042a4b3b513b5227e27d5ac7d771691cd
+IMAGE_DIGEST="sha256:cbc80d44c730e35635faf605edab251f6dafa6fa5d873e89ab8835643b87c76b"
+#prev "sha256:297346e498db363e779fcd9a78f59c6eea553235cfe26a37def2ffe599f47f6e"
 LUACT_IMAGE="umegaya/luact@$IMAGE_DIGEST"
 PRELOADS=(libpthread.so.0 libjemalloc.so.1)	
 PRELOAD_LIBS=`join : ${PRELOADS[@]}`
 VERBOSE=
 LUACT_CONFIG=(ssl.pubkey=$CERTPATH/server.pem ssl.privkey=$CERTPATH/server-key.pem)
 DOCKER_CONFIG=()
-BUILD_SRCS=(.yue/certs src)
+SETUP_SSH_CMD="rm -r /root/.ssh && cp -r $WORKDIR/$CERTPATH /root/.ssh && chmod 600 /root/.ssh/id_rsa /root/.ssh/*key.pem"
 
 # parse common argument
 cnt=1
@@ -309,6 +311,8 @@ case ${!cnt} in
 	;;	
 	"run" | "node" | "sdn" | "build" | "init")
 	SUBCOMMAND=${!cnt}
+	#echo $cnt, ${@[cnt]}
+	#unset -v $@[$cnt]
 	set -- `remove_arg $cnt $cnt $@`
 	;;
 	*)
@@ -474,6 +478,9 @@ function run {
 		docker kill $CONTAINER_NAME >& /dev/null
 		docker rm -v $CONTAINER_NAME >& /dev/null
 	fi
+	if [ ! -z $LUACT_PATH ]; then
+		docker_options="$docker_options -v $LUACT_PATH:/luact"
+	fi
 	if [ ! -z $EXECFILE ]; then
 		docker_options="$docker_options -v $MOUNT_PATH:$WORKDIR"
 		if [ ${#LIBPATH[@]} -ne 0 ]; then
@@ -482,11 +489,8 @@ function run {
 				docker_options="$docker_options -v $p:$p"
 			done
 		fi
-		if [ ! -z $LUACT_PATH ]; then
-			docker_options="$docker_options -v $LUACT_PATH:/luact"
-		fi
-		local cmd="cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options $EXECFILE"
-		#echo "cmdl:	docker run $docker_options $LUACT_IMAGE bash -c \"$cmd\""
+		local cmd="$SETUP_SSH_CMD && cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options $EXECFILE"
+		echo "cmdl:	docker run $docker_options $LUACT_IMAGE bash -c \"$cmd\""
 		if [ ! -z $DAEMON ]; then
 			CID=$(docker run $docker_options $LUACT_IMAGE bash -c "$cmd")
 			echo $CID
@@ -494,8 +498,7 @@ function run {
 			docker run $docker_options $LUACT_IMAGE bash -c "$cmd"
 		fi
 	else
-		# TODO : we should give default mount point of data/logs in container?
-		# now user explicitly specify like -d volume=/data:/lunarsurface/data and -d volume=/logs:/lunarsurface/logs.
+		docker_options="$docker_options -v $MOUNT_PATH/logs:$WORKDIR/logs -v $MOUNT_PATH/data:$WORKDIR/data"
 		if [ ! -z $EXECIMAGE ]; then
 			if [ ! -z $DAEMON ]; then
 				CID=$(docker run $docker_options $EXECIMAGE)
@@ -515,10 +518,12 @@ function run {
 # build command
 #===========================================
 function build {
+	echo "args:$@"
 	local IMAGENAME=
 	local EXECFILE=src/main.lua
 	local PUSH=
 	local NEW_BUILDER=
+	local COMMIT_BUILDER=
 	while [ $# -gt 0 ]; do
 		case $1 in
 			-e)
@@ -558,14 +563,18 @@ function build {
 	echo "re-copying files to build"
 	rm -rf build
 	git clone `git config --get remote.origin.url` --branch `git rev-parse --abbrev-ref HEAD` build
-	if [[ ! -e "./build/Dockerfile" || ! -z NEW_BUILDER ]]; then
+	if [ ! -e "./build/Dockerfile" ]; then
+		NEW_BUILDER=yes
+	fi 
+	echo "$NEW_BUILDER"
+	if [ ! -z $NEW_BUILDER ]; then
+		echo "rebuild dockerfile"
 		cat << __TEMPLATE__  > ./Dockerfile
 FROM $LUACT_IMAGE
 ENV LD_PRELOAD=$PRELOAD_LIBS
 ADD . $WORKDIR
-RUN chmod 600 $WORKDIR/$ID_RSA && \  
-  echo "IdentityFile $WORKDIR/$ID_RSA" >> /etc/ssh/ssh_config && \  
-  echo "StrictHostKeyChecking no" >> /etc/ssh/ssh_config  
+RUN cd $WORKDIR && git reset --hard
+RUN $SETUP_SSH_CMD
 CMD bash -c "cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options $EXECFILE"
 __TEMPLATE__
 		cp ./Dockerfile ./build/Dockerfile
