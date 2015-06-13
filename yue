@@ -227,12 +227,7 @@ __IGNORE_TEMPLATE__
 WORK_NODE=`work_node`
 if [ ! -z $WORK_NODE ]; then
 	#echo "$MACHINE_CMD url `work_node`"
-	$MACHINE_CMD url $WORK_NODE >& /dev/null
-	if [ $? -ne 0 ]; then
-		echo "start dev machine..."
-		$MACHINE_CMD start $WORK_NODE
-		echo "done"
-	fi
+	$MACHINE_CMD start $WORK_NODE
 fi
 
 #===========================================
@@ -245,10 +240,10 @@ DATADIR="$WORKDIR/data"
 LIBPATH=(/usr/local/share/lua/5.1/ /usr/local/share/luajit-2.1.0-alpha/)
 LUAJIT_BIN="luajit-2.1.0-alpha -e 'require([[jit.opt]]).start([[minstitch=10000]])' -e 'package.path=[[/luact/?.lua;]]..package.path'"
 LUACT_PATH=
-IMAGE_DIGEST="sha256:cbc80d44c730e35635faf605edab251f6dafa6fa5d873e89ab8835643b87c76b"
-#prev "sha256:297346e498db363e779fcd9a78f59c6eea553235cfe26a37def2ffe599f47f6e"
+IMAGE_DIGEST="sha256:6f5df55c112c59f45fcdf76b3e3a11322d7fede71f20c9bbc86ddc3bd4a36d83"
+#prev "sha256:29ef6093861b25de8f172ebcd4cc281e2e43f29b1bb22ac688982068969d8331"
 LUACT_IMAGE="umegaya/luact@$IMAGE_DIGEST"
-PRELOADS=(libpthread.so.0 libjemalloc.so.1)	
+PRELOADS=(libpthread.so.0)
 PRELOAD_LIBS=`join : ${PRELOADS[@]}`
 VERBOSE=
 LUACT_CONFIG=(ssl.pubkey=$CERTPATH/server.pem ssl.privkey=$CERTPATH/server-key.pem)
@@ -490,7 +485,7 @@ function run {
 			done
 		fi
 		local cmd="$SETUP_SSH_CMD && cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options $EXECFILE"
-		echo "cmdl:	docker run $docker_options $LUACT_IMAGE bash -c \"$cmd\""
+		#echo "cmdl:	docker run $docker_options $LUACT_IMAGE bash -c \"$cmd\""
 		if [ ! -z $DAEMON ]; then
 			CID=$(docker run $docker_options $LUACT_IMAGE bash -c "$cmd")
 			echo $CID
@@ -518,7 +513,6 @@ function run {
 # build command
 #===========================================
 function build {
-	echo "args:$@"
 	local IMAGENAME=
 	local EXECFILE=src/main.lua
 	local PUSH=
@@ -563,10 +557,12 @@ function build {
 	echo "re-copying files to build"
 	rm -rf build
 	git clone `git config --get remote.origin.url` --branch `git rev-parse --abbrev-ref HEAD` build
+	pushd build
+		git submodule update --init --recursive
+	popd
 	if [ ! -e "./build/Dockerfile" ]; then
 		NEW_BUILDER=yes
 	fi 
-	echo "$NEW_BUILDER"
 	if [ ! -z $NEW_BUILDER ]; then
 		echo "rebuild dockerfile"
 		cat << __TEMPLATE__  > ./Dockerfile
@@ -634,7 +630,7 @@ function node {
 			FACTORY=${1#*=}
 			shift
 			;;
-			"create" | "rm" | "ls" | "ssh" | "env")
+			"create" | "rm" | "ls" | "ssh" | "env" | "regenerate-certs")
 			SUBC=$1
 			shift
 			;;
@@ -694,13 +690,21 @@ function node {
 		$MACHINE_CMD ssh $fullname $@
 		exit 0
 		;;
+		regenerate-certs)
+		$MACHINE_CMD --debug regenerate-certs $fullname
+		exit 0
+		;;
+		*)
+		echo "no such node command:$SUBC"
+		exit -1
+		;;
 	esac
 	switch_to
 	#echo "cmdl: docker run $docker_options $LUACT_IMAGE bash -c \"$cmd\" | sed -e 's/docker-machine/$MACHINE_CMD/g'"
 	#eval `docker run $docker_options $LUACT_IMAGE bash -c "$cmd"`
 	#docker run $docker_options $LUACT_IMAGE bash -c "$cmd"
 	local out=`docker run $docker_options $LUACT_IMAGE bash -c "$cmd" | sed -e 's/docker-machine/$MACHINE_CMD/g'`
-	#echo "cmd out:$out"
+	echo "cmd out:$out"
 	eval $out
 }
 

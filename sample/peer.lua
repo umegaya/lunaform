@@ -5,8 +5,6 @@ if luact.thread_id == 1 then
 		local peers = {}
 		return {
 			register = function (id)
-				local ok, r = pcall(luact.peer)
-				assert((not ok) and r:is('invalid'))
 				peers[id] = assert(luact.peer("/notify"))
 				return "pass"..tostring(id)
 			end,
