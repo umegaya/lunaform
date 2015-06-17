@@ -32,6 +32,8 @@ CERTKEY="$CERTPATH/key.pem"
 ID_RSA="$CERTPATH/id_rsa"
 SSH_CONFIG="$CERTPATH/config"
 MACHINE_CMD="$MACHINE_BIN_NAME --storage-path=$MACHINEPATH --tls-ca-cert=$CA --tls-ca-key=$CAKEY --tls-client-cert=$CERT --tls-client-key=$CERTKEY"
+FACTORY_PATHS=(.yue/factory ~/.yue/factory)
+
 
 
 #===========================================
@@ -105,6 +107,12 @@ __VERSION__
 #===========================================
 # utils
 #===========================================
+VERBOSE=
+function log {
+	if [ ! -z $VERBOSE ]; then
+		echo $@
+	fi
+}
 function join { local IFS="$1"; shift; echo "$*"; }
 function abspath {
 	local dir=`pwd`
@@ -140,12 +148,25 @@ function active_node {
 function switch_to {
 	local nodename=`active_node $@`
 	echo "switch_to:$nodename"
+	log "cmd:$MACHINE_CMD env $nodename"
 	eval $($MACHINE_CMD env $nodename)
+	log "result:$?"
 }
 function fill_env_value {
 	echo $(eval echo $(cat $1 | sed 's/\"/\\"/g'))
 }
-
+function factory_json {
+	local FACTORY=$@
+	for c in "${FACTORY_PATHS[@]}"
+	do
+		if [ -e $c ]; then
+			if [ -z $FACTORY ]; then
+				FACTORY=$c
+			fi
+		fi
+	done
+	echo `fill_env_value $FACTORY`
+}
 function init_certs {
 	if [ ! -e $CERTPATH ]; then
 		mkdir -p $CERTPATH
@@ -226,8 +247,12 @@ __IGNORE_TEMPLATE__
 # run docker work space
 WORK_NODE=`work_node`
 if [ ! -z $WORK_NODE ]; then
-	#echo "$MACHINE_CMD url `work_node`"
-	$MACHINE_CMD start $WORK_NODE
+	set -e 
+	WORK_NODE_URL=`$MACHINE_CMD url $WORK_NODE`
+	if [ $? != 0 ]; then
+		$MACHINE_CMD start $WORK_NODE
+	fi
+	set +e
 fi
 
 #===========================================
@@ -240,12 +265,11 @@ DATADIR="$WORKDIR/data"
 LIBPATH=(/usr/local/share/lua/5.1/ /usr/local/share/luajit-2.1.0-alpha/)
 LUAJIT_BIN="luajit-2.1.0-alpha -e 'require([[jit.opt]]).start([[minstitch=10000]])' -e 'package.path=[[/luact/?.lua;]]..package.path'"
 LUACT_PATH=
-IMAGE_DIGEST="sha256:6f5df55c112c59f45fcdf76b3e3a11322d7fede71f20c9bbc86ddc3bd4a36d83"
-#prev "sha256:29ef6093861b25de8f172ebcd4cc281e2e43f29b1bb22ac688982068969d8331"
+IMAGE_DIGEST="sha256:3679815d4c0221fd15eb7f71d637b67cf0b8db5a911d1fddcfcb8844f06a3d7b"
+#prev "sha256:6f5df55c112c59f45fcdf76b3e3a11322d7fede71f20c9bbc86ddc3bd4a36d83"
 LUACT_IMAGE="umegaya/luact@$IMAGE_DIGEST"
 PRELOADS=(libpthread.so.0)
 PRELOAD_LIBS=`join : ${PRELOADS[@]}`
-VERBOSE=
 LUACT_CONFIG=(ssl.pubkey=$CERTPATH/server.pem ssl.privkey=$CERTPATH/server-key.pem)
 DOCKER_CONFIG=()
 SETUP_SSH_CMD="rm -r /root/.ssh && cp -r $WORKDIR/$CERTPATH /root/.ssh && chmod 600 /root/.ssh/id_rsa /root/.ssh/*key.pem"
@@ -274,7 +298,11 @@ case ${!cnt} in
 	set -- `remove_arg $cnt $cnt $@`
 	;;
 	--luact=*)
-	LUACT_PATH=${1#*=}
+	LUACT_PATH=${!cnt#*=}
+	set -- `remove_arg $cnt $cnt $@`
+	;;
+	--luact-image=*)
+	LUACT_IMAGE=${!cnt#*=}
 	set -- `remove_arg $cnt $cnt $@`
 	;;
 	-d)
@@ -316,7 +344,7 @@ case ${!cnt} in
 esac
 done
 
-#echo "after process:$@"
+echo "after process:$@:$LUACT_IMAGE"
 
 
 #===========================================
@@ -370,6 +398,7 @@ function run {
 	local EXECIMAGE=
 	local NUM_CORE=
 	local HOST=
+	local HOST_KIND="virtualbox"
 	local MOUNT_PATH=`pwd`
 	while [ $# -gt 0 ]; do
 		case $1 in
@@ -411,6 +440,7 @@ function run {
 			;;
 			--host=*)
 			HOST=${1#*=}
+			HOST_KIND=`yue node kind $HOST`
 			shift
 			;;
 			--core=*)
@@ -439,7 +469,8 @@ function run {
 	#echo "execfile:$EXECFILE"
 	#echo "luajit:$LUAJIT_BIN"
 	#echo "host:$HOST"
-	local luact_options="--datadir=$DATADIR"
+	local FACTORY=`factory_json`
+	local luact_options="--datadir=$DATADIR -l node.kind=$HOST_KIND -l node.create_opts='${FACTORY}'"
 	if [ ${#LUACT_CONFIG[@]} -ne 0 ]; then
 		for c in "${LUACT_CONFIG[@]}"
 		do
@@ -462,7 +493,6 @@ function run {
 	fi
 	if [ ! -z $DAEMON ]; then
 		docker_options="$docker_options -d --name $CONTAINER_NAME"
-		luact_options="--logdir=$LOGDIR $luact_options"
 	else
 		docker_options="$docker_options --rm -ti"
 	fi
@@ -496,10 +526,10 @@ function run {
 		docker_options="$docker_options -v $MOUNT_PATH/logs:$WORKDIR/logs -v $MOUNT_PATH/data:$WORKDIR/data"
 		if [ ! -z $EXECIMAGE ]; then
 			if [ ! -z $DAEMON ]; then
-				CID=$(docker run $docker_options $EXECIMAGE)
+				CID=$(docker run $docker_options -e LUACT_OPTIONS='$luact_options' $EXECIMAGE)
 				echo $CID
 			else
-				docker run $docker_options $EXECIMAGE
+				docker run $docker_options -e LUACT_OPTIONS='$luact_options' $EXECIMAGE
 			fi
 		else
 			echo "either execute file or image must be specified"
@@ -518,6 +548,7 @@ function build {
 	local PUSH=
 	local NEW_BUILDER=
 	local COMMIT_BUILDER=
+	local SCRIPTPATH="$( cd "$(dirname "$0")" ; pwd -P )"
 	while [ $# -gt 0 ]; do
 		case $1 in
 			-e)
@@ -554,7 +585,7 @@ function build {
 			luact_options="$luact_options --$c"
 		done
 	fi
-	echo "re-copying files to build"
+	echo "re-copying files to build (scppath:$SCRIPTPATH)"
 	rm -rf build
 	git clone `git config --get remote.origin.url` --branch `git rev-parse --abbrev-ref HEAD` build
 	pushd build
@@ -569,6 +600,7 @@ function build {
 FROM $LUACT_IMAGE
 ENV LD_PRELOAD=$PRELOAD_LIBS
 ADD . $WORKDIR
+ADD $SCRIPTPATH/yue /usr/local/bin/yue
 RUN cd $WORKDIR && git reset --hard
 RUN $SETUP_SSH_CMD
 CMD bash -c "cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options $EXECFILE"
@@ -597,19 +629,10 @@ __TEMPLATE__
 # node command
 #===========================================
 function node {
-	local FACTORY_PATHS=(.yue/factory ~/.yue/factory)
 	local TYPE=
 	local FACTORY=
 	local NAME=
 	local SUBC=create
-	for c in "${FACTORY_PATHS[@]}"
-	do
-		if [ -e $c ]; then
-			if [ -z $FACTORY ]; then
-				FACTORY=$c
-			fi
-		fi
-	done
 	while [ $# -gt 0 ]; do
 		case $1 in
 			-t)
@@ -630,7 +653,7 @@ function node {
 			FACTORY=${1#*=}
 			shift
 			;;
-			"create" | "rm" | "ls" | "ssh" | "env" | "regenerate-certs")
+			"create" | "rm" | "ls" | "ssh" | "env" | "kind" | "regenerate-certs")
 			SUBC=$1
 			shift
 			;;
@@ -671,9 +694,13 @@ function node {
 	local fullname=`active_node $NAME`
 	case $SUBC in
 		create)
+		if [ -z $TYPE ]; then
+			echo "type should be specified"
+			exit -1
+		fi
 		$MACHINE_CMD ip $fullname 2>&1>/dev/null && [ $? == 0 ] && echo "$fullname already created" && exit 0
 		echo "create new machine for $fullname"
-		FACTORY=`fill_env_value $FACTORY`
+		FACTORY=`factory_json $FACTORY`
 		cmd="cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options /luact/luact/bin/node.lua create $fullname $TYPE '${FACTORY}'"
 		;;
 		rm)
@@ -681,6 +708,12 @@ function node {
 		;;
 		ls)
 		cmd="cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options /luact/luact/bin/node.lua ls"
+		;;
+		kind)
+		machine_data=`$MACHINE_CMD inspect $fullname`
+		cmd="cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options /luact/luact/bin/node.lua kind '$machine_data'"
+		docker run $docker_options $LUACT_IMAGE bash -c "$cmd"
+		exit 0
 		;;
 		env)
 		$MACHINE_CMD env $fullname
@@ -700,11 +733,11 @@ function node {
 		;;
 	esac
 	switch_to
-	#echo "cmdl: docker run $docker_options $LUACT_IMAGE bash -c \"$cmd\" | sed -e 's/docker-machine/$MACHINE_CMD/g'"
+	log "docker run $docker_options $LUACT_IMAGE bash -c \"$cmd\" | sed -e 's/docker-machine/$MACHINE_CMD/g'"
 	#eval `docker run $docker_options $LUACT_IMAGE bash -c "$cmd"`
 	#docker run $docker_options $LUACT_IMAGE bash -c "$cmd"
 	local out=`docker run $docker_options $LUACT_IMAGE bash -c "$cmd" | sed -e 's/docker-machine/$MACHINE_CMD/g'`
-	echo "cmd out:$out"
+	log "cmd out:$out"
 	eval $out
 }
 
