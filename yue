@@ -32,7 +32,7 @@ CERTKEY="$CERTPATH/key.pem"
 ID_RSA="$CERTPATH/id_rsa"
 SSH_CONFIG="$CERTPATH/config"
 MACHINE_CMD="$MACHINE_BIN_NAME --storage-path=$MACHINEPATH --tls-ca-cert=$CA --tls-ca-key=$CAKEY --tls-client-cert=$CERT --tls-client-key=$CERTKEY"
-FACTORY_PATHS=(.yue/factory ~/.yue/factory)
+IAAS_CONFIG_PATHS=(.yue/factory ~/.yue/factory)
 
 
 
@@ -148,24 +148,22 @@ function active_node {
 function switch_to {
 	local nodename=`active_node $@`
 	echo "switch_to:$nodename"
-	log "cmd:$MACHINE_CMD env $nodename"
 	eval $($MACHINE_CMD env $nodename)
-	log "result:$?"
 }
 function fill_env_value {
 	echo $(eval echo $(cat $1 | sed 's/\"/\\"/g'))
 }
-function factory_json {
-	local FACTORY=$@
-	for c in "${FACTORY_PATHS[@]}"
+function iaas_config_json {
+	local config=$@
+	for c in "${IAAS_CONFIG_PATHS[@]}"
 	do
 		if [ -e $c ]; then
-			if [ -z $FACTORY ]; then
-				FACTORY=$c
+			if [ -z $config ]; then
+				config=$c
 			fi
 		fi
 	done
-	echo `fill_env_value $FACTORY`
+	echo $config
 }
 function init_certs {
 	if [ ! -e $CERTPATH ]; then
@@ -265,7 +263,7 @@ DATADIR="$WORKDIR/data"
 LIBPATH=(/usr/local/share/lua/5.1/ /usr/local/share/luajit-2.1.0-alpha/)
 LUAJIT_BIN="luajit-2.1.0-alpha -e 'require([[jit.opt]]).start([[minstitch=10000]])' -e 'package.path=[[/luact/?.lua;]]..package.path'"
 LUACT_PATH=
-IMAGE_DIGEST="sha256:3679815d4c0221fd15eb7f71d637b67cf0b8db5a911d1fddcfcb8844f06a3d7b"
+IMAGE_DIGEST="sha256:1c595aacf92d7c4401a76b0d13f0be70abbc98dd7795289cd2dbe2fadb5e316f"
 #prev "sha256:6f5df55c112c59f45fcdf76b3e3a11322d7fede71f20c9bbc86ddc3bd4a36d83"
 LUACT_IMAGE="umegaya/luact@$IMAGE_DIGEST"
 PRELOADS=(libpthread.so.0)
@@ -344,7 +342,7 @@ case ${!cnt} in
 esac
 done
 
-echo "after process:$@:$LUACT_IMAGE"
+# echo "after process:$@"
 
 
 #===========================================
@@ -469,8 +467,9 @@ function run {
 	#echo "execfile:$EXECFILE"
 	#echo "luajit:$LUAJIT_BIN"
 	#echo "host:$HOST"
-	local FACTORY=`factory_json`
-	local luact_options="--datadir=$DATADIR -l node.kind=$HOST_KIND -l node.create_opts='${FACTORY}'"
+	local CONFIG_PATH=`iaas_config_json`
+	local IAAS_CONFIG=`fill_env_value $CONFIG_PATH`
+	local luact_options="--datadir=$DATADIR --node.kind=$HOST_KIND --node.create_opts='${IAAS_CONFIG}'"
 	if [ ${#LUACT_CONFIG[@]} -ne 0 ]; then
 		for c in "${LUACT_CONFIG[@]}"
 		do
@@ -590,6 +589,7 @@ function build {
 	git clone `git config --get remote.origin.url` --branch `git rev-parse --abbrev-ref HEAD` build
 	pushd build
 		git submodule update --init --recursive
+		cp $SCRIPTPATH/yue .
 	popd
 	if [ ! -e "./build/Dockerfile" ]; then
 		NEW_BUILDER=yes
@@ -600,7 +600,8 @@ function build {
 FROM $LUACT_IMAGE
 ENV LD_PRELOAD=$PRELOAD_LIBS
 ADD . $WORKDIR
-ADD $SCRIPTPATH/yue /usr/local/bin/yue
+ADD ./yue /usr/local/bin/yue
+RUN chmod 755 /usr/local/bin/yue
 RUN cd $WORKDIR && git reset --hard
 RUN $SETUP_SSH_CMD
 CMD bash -c "cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options $EXECFILE"
@@ -700,8 +701,9 @@ function node {
 		fi
 		$MACHINE_CMD ip $fullname 2>&1>/dev/null && [ $? == 0 ] && echo "$fullname already created" && exit 0
 		echo "create new machine for $fullname"
-		FACTORY=`factory_json $FACTORY`
-		cmd="cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options /luact/luact/bin/node.lua create $fullname $TYPE '${FACTORY}'"
+		local CONFIG_PATH=`iaas_config_json`
+		local IAAS_CONFIG=`fill_env_value $CONFIG_PATH`
+		cmd="cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options /luact/luact/bin/node.lua create $fullname $TYPE '${IAAS_CONFIG}'"
 		;;
 		rm)
 		cmd="cd $WORKDIR && $LUAJIT_BIN /luact/run.lua $luact_options /luact/luact/bin/node.lua rm $fullname"
